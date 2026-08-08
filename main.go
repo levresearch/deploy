@@ -36,19 +36,27 @@ func run(args []string) int {
 
 func runDeploy(args []string) int {
 	flags := newFlagSet("deploy")
+	options := DeployOptions{}
+	stringFlag(flags, &options.Context, "context", "C", "", "scope deploy to this path instead of the cwd")
+	stringFlag(flags, &options.Destination, "destination", "D", "", "where the project gets deployed")
+	stringFlag(flags, &options.Environment, "environment", "e", defaultEnvironmentName, "environment to resolve")
+	flags.BoolVar(&options.AllowDirty, "allow-dirty", false, "deploy with uncommitted changes present")
 	if keepGoing, exitCode := parseCommandFlags(flags, args); !keepGoing {
 		return exitCode
 	}
 
-	fatal("deploying is not implemented yet, try deploy check")
+	exitCode, err := RunDeploy(options)
+	if err != nil {
+		fatal("%v", err)
+	}
 
-	return exitPreconditionNotMet
+	return exitCode
 }
 
 func runCheck(args []string) int {
 	flags := newFlagSet("check")
-	environment := flags.String("environment", defaultEnvironmentName, "environment to resolve")
-	flags.StringVar(environment, "e", defaultEnvironmentName, "environment to resolve")
+	environment := new(string)
+	stringFlag(flags, environment, "environment", "e", defaultEnvironmentName, "environment to resolve")
 	if keepGoing, exitCode := parseCommandFlags(flags, args); !keepGoing {
 		return exitCode
 	}
@@ -91,6 +99,13 @@ func newFlagSet(name string) *flag.FlagSet {
 	return flags
 }
 
+// stringFlag registers a long and a short name against one variable, since go's
+// flag package has no native pairing.
+func stringFlag(flags *flag.FlagSet, target *string, long, short, fallback, usage string) {
+	flags.StringVar(target, long, fallback, usage)
+	flags.StringVar(target, short, fallback, usage)
+}
+
 // parseCommandFlags reports whether the command should carry on. Asking for help
 // is not a failure, so it stops with a success code rather than an error one.
 func parseCommandFlags(flags *flag.FlagSet, args []string) (bool, int) {
@@ -114,6 +129,9 @@ usage:
   deploy check [flags]    validate the config, print it, change nothing
 
 flags:
+  -C, --context <path>      scope deploy to this path instead of the cwd
+  -D, --destination <path>  where the project gets deployed
+      --allow-dirty         deploy with uncommitted changes present
   -e, --environment <name>  environment to resolve, default "`+defaultEnvironmentName+`"
   -h, --help                show this help
 `)

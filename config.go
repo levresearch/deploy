@@ -76,6 +76,31 @@ func (service Service) IsStateful() bool {
 	return service.Stateful != nil && *service.Stateful
 }
 
+// dockerfilePath reads the two forms build can take, a bare path or an object
+// naming one. The inline build description is task 11 and is refused here rather
+// than half handled.
+func dockerfilePath(serviceName string, service Service) (string, error) {
+	var asPath string
+	if err := json.Unmarshal(service.Build, &asPath); err == nil {
+		return asPath, nil
+	}
+
+	var asObject struct {
+		Dockerfile string `json:"dockerfile"`
+	}
+	if err := json.Unmarshal(service.Build, &asObject); err != nil {
+		return "", fmt.Errorf("service %q has an unreadable build block: %w", serviceName, err)
+	}
+	if asObject.Dockerfile == "" {
+		return "", fmt.Errorf(
+			"service %q has a build block with no dockerfile, and describing a build inline is not implemented yet",
+			serviceName,
+		)
+	}
+
+	return asObject.Dockerfile, nil
+}
+
 // serviceFields is the marshalling shape of the keys deploy owns. Service itself
 // cannot carry these tags because Extra has to merge in on top.
 type serviceFields struct {
