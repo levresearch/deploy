@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path"
+	"slices"
 	"strings"
 )
 
@@ -12,6 +13,7 @@ type DeployOptions struct {
 	Destination string
 	Environment string
 	AllowDirty  bool
+	ForceUnlock bool
 }
 
 // Layout is where everything for one project lives on the destination. Volumes
@@ -93,8 +95,19 @@ func RunDeploy(options DeployOptions) (int, error) {
 	fmt.Printf("deploying %s %s to %s\n", resolved.Name, ShortCommit(commit), destination)
 
 	layout := NewLayout(destination.Path, resolved.ID)
-	releaseDirectory := layout.Release(commit)
 
+	lock, err := AcquireLock(runner, layout, commit, options.ForceUnlock)
+	if err != nil {
+		return exitPreconditionNotMet, err
+	}
+	defer lock.Release()
+
+	state, err := ReadState(runner, layout)
+	if err != nil {
+		return exitPreconditionNotMet, err
+	}
+
+	releaseDirectory := layout.Release(commit)
 	if err := PlaceRelease(runner, repositoryPath, commit, releaseDirectory); err != nil {
 		return exitDeployFailed, err
 	}
@@ -116,8 +129,96 @@ func RunDeploy(options DeployOptions) (int, error) {
 	if err := startStack(runner, resolved, composeFile, commit); err != nil {
 		return exitDeployFailed, err
 	}
-
 	fmt.Printf("  %s is up\n", ProjectName(resolved.ID, commit))
+
+	// everything past here has already put the new release in service, so a
+	// failure is reported and never rolled back
+	state = state.RecordRelease(commit, resolved.Environment)
+	state, pruneErr := PruneReleases(runner, layout, resolved.ID, state, resolved.Retention)
+
+	if err := WriteState(runner, layout, state); err != nil {
+		return exitLiveButNeedsAHuman, fmt.Errorf(
+			"%s is deployed and running, but recording it failed, so deploy has lost track of what is current: %w",
+			ShortCommit(commit), err,
+		)
+	}
+	if pruneErr != nil {
+		return exitLiveButNeedsAHuman, fmt.Errorf(
+			"%s is deployed and running, but pruning old releases failed: %w", ShortCommit(commit), pruneErr,
+		)
+	}
+
+	return exitOK, nil
+}
+
+func RunReleases(options DeployOptions) (int, error) {
+	startPath := options.Context
+	if startPath == "" {
+		working, err := os.Getwd()
+		if err != nil {
+			return exitPreconditionNotMet, err
+		}
+		startPath = working
+	}
+
+	repositoryPath, err := FindRepository(startPath)
+	if err != nil {
+		return exitPreconditionNotMet, err
+	}
+
+	resolved, err := loadResolvedConfig(repositoryPath, options.Environment)
+	if err != nil {
+		return exitPreconditionNotMet, err
+	}
+
+	destinationText := options.Destination
+	if destinationText == "" {
+		destinationText = resolved.Destination
+	}
+	destination, err := ParseDestination(destinationText)
+	if err != nil {
+		return exitPreconditionNotMet, err
+	}
+	if destination.IsRemote() {
+		return exitPreconditionNotMet, fmt.Errorf(
+			"destination %s is remote, and ssh transport is not implemented yet", destination,
+		)
+	}
+
+	runner := LocalRunner{}
+	layout := NewLayout(destination.Path, resolved.ID)
+
+	state, err := ReadState(runner, layout)
+	if err != nil {
+		return exitPreconditionNotMet, err
+	}
+	if state.Current == "" {
+		fmt.Printf("%s has never been deployed to %s\n", resolved.Name, destination)
+		return exitOK, nil
+	}
+
+	onDisk, err := runner.ListDirectory(layout.Releases())
+	if err != nil {
+		return exitPreconditionNotMet, err
+	}
+
+	fmt.Printf("%s on %s, environment %s\n", resolved.Name, destination, state.Environment)
+	for _, release := range state.Releases {
+		marker := "  "
+		switch release {
+		case state.Current:
+			marker = "* "
+		case state.Previous:
+			marker = "- "
+		}
+
+		note := ""
+		if !slices.Contains(onDisk, release) {
+			note = "  (missing from disk)"
+		}
+		fmt.Printf("%s%s%s\n", marker, release, note)
+	}
+	fmt.Printf("\n* current, - previous, keeping %d\n", resolved.Retention)
 
 	return exitOK, nil
 }

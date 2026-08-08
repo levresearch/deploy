@@ -14,6 +14,9 @@ const (
 	exitOK                 = 0
 	exitDeployFailed       = 1
 	exitPreconditionNotMet = 2
+	// deployed and serving, but something afterwards needs a person. tearing the
+	// new release down over a failed prune would be a self inflicted outage
+	exitLiveButNeedsAHuman = 3
 )
 
 func main() {
@@ -25,6 +28,8 @@ func run(args []string) int {
 		switch args[0] {
 		case "check":
 			return runCheck(args[1:])
+		case "releases":
+			return runReleases(args[1:])
 		default:
 			fatal("unknown command %q, run deploy -h for the list", args[0])
 			return exitPreconditionNotMet
@@ -41,11 +46,30 @@ func runDeploy(args []string) int {
 	stringFlag(flags, &options.Destination, "destination", "D", "", "where the project gets deployed")
 	stringFlag(flags, &options.Environment, "environment", "e", defaultEnvironmentName, "environment to resolve")
 	flags.BoolVar(&options.AllowDirty, "allow-dirty", false, "deploy with uncommitted changes present")
+	flags.BoolVar(&options.ForceUnlock, "force-unlock", false, "break a stale deploy.lock")
 	if keepGoing, exitCode := parseCommandFlags(flags, args); !keepGoing {
 		return exitCode
 	}
 
 	exitCode, err := RunDeploy(options)
+	if err != nil {
+		fatal("%v", err)
+	}
+
+	return exitCode
+}
+
+func runReleases(args []string) int {
+	flags := newFlagSet("releases")
+	options := DeployOptions{}
+	stringFlag(flags, &options.Context, "context", "C", "", "scope deploy to this path instead of the cwd")
+	stringFlag(flags, &options.Destination, "destination", "D", "", "where the project gets deployed")
+	stringFlag(flags, &options.Environment, "environment", "e", defaultEnvironmentName, "environment to resolve")
+	if keepGoing, exitCode := parseCommandFlags(flags, args); !keepGoing {
+		return exitCode
+	}
+
+	exitCode, err := RunReleases(options)
 	if err != nil {
 		fatal("%v", err)
 	}
@@ -127,11 +151,13 @@ func printUsage() {
 usage:
   deploy [flags]          deploy the current commit
   deploy check [flags]    validate the config, print it, change nothing
+  deploy releases         releases on the destination, current one marked
 
 flags:
   -C, --context <path>      scope deploy to this path instead of the cwd
   -D, --destination <path>  where the project gets deployed
       --allow-dirty         deploy with uncommitted changes present
+      --force-unlock        break a stale deploy.lock
   -e, --environment <name>  environment to resolve, default "`+defaultEnvironmentName+`"
   -h, --help                show this help
 `)

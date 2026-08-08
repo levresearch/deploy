@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"strings"
@@ -61,6 +62,9 @@ type Runner interface {
 	Stream(command []string, output io.Writer) error
 	MkdirAll(path string) error
 	WriteFile(path string, contents []byte) error
+	ReadFile(path string) ([]byte, error)
+	ListDirectory(path string) ([]string, error)
+	RemoveAll(path string) error
 	ExtractTar(directory string, archive io.Reader) error
 }
 
@@ -88,6 +92,31 @@ func (LocalRunner) MkdirAll(path string) error {
 
 func (LocalRunner) WriteFile(path string, contents []byte) error {
 	return os.WriteFile(path, contents, 0o644)
+}
+
+func (LocalRunner) ReadFile(path string) ([]byte, error) {
+	return os.ReadFile(path)
+}
+
+func (LocalRunner) ListDirectory(path string) ([]string, error) {
+	entries, err := os.ReadDir(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	names := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		names = append(names, entry.Name())
+	}
+
+	return names, nil
+}
+
+func (LocalRunner) RemoveAll(path string) error {
+	return os.RemoveAll(path)
 }
 
 func (LocalRunner) ExtractTar(directory string, archive io.Reader) error {

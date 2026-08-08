@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -472,6 +473,80 @@ func TestDeployRefusesARemoteDestinationForNow(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "not implemented yet") {
 		t.Errorf("the refusal should say so honestly, got: %v", err)
+	}
+}
+
+// Deploying repeatedly is where retention actually gets exercised, so this walks
+// four real deploys rather than asserting on the arithmetic alone.
+func TestRepeatedDeploysRetainThreeReleasesAndPruneTheOldest(t *testing.T) {
+	dockerAvailable(t)
+
+	repository := newRepository(t)
+	writeFile(t, repository, configFileName, `{
+      "version": 1,
+      "id": "dd000004",
+      "name": "retained",
+      "services": {
+        "app": {
+          "image": "busybox:latest",
+          "command": ["sh", "-c", "sleep 300"],
+          "stateful": false,
+          "healthcheck": {"command": ["CMD", "true"], "interval": "1s", "retries": 5}
+        }
+      }
+    }`)
+
+	destination := t.TempDir()
+	layout := NewLayout(destination, "dd000004")
+
+	var commits []string
+	for round := range 4 {
+		commit := commitFile(t, repository, "round.txt", string(rune('a'+round)))
+		commits = append(commits, ShortCommit(commit))
+
+		t.Cleanup(func() {
+			exec.Command("docker", "compose", "--project-name", ProjectName("dd000004", commit), "down").Run()
+		})
+
+		exitCode, err := RunDeploy(DeployOptions{
+			Context:     repository,
+			Destination: destination,
+			Environment: defaultEnvironmentName,
+		})
+		if err != nil {
+			t.Fatalf("deploy %d: %v", round+1, err)
+		}
+		if exitCode != exitOK {
+			t.Fatalf("deploy %d exit code = %d", round+1, exitCode)
+		}
+	}
+
+	state, err := ReadState(LocalRunner{}, layout)
+	if err != nil {
+		t.Fatalf("ReadState: %v", err)
+	}
+
+	newest, second, third, oldest := commits[3], commits[2], commits[1], commits[0]
+
+	if state.Current != newest {
+		t.Errorf("current = %q, want the newest commit %q", state.Current, newest)
+	}
+	if state.Previous != second {
+		t.Errorf("previous = %q, want %q", state.Previous, second)
+	}
+	if want := []string{newest, second, third}; !slices.Equal(state.Releases, want) {
+		t.Errorf("releases = %v, want %v", state.Releases, want)
+	}
+
+	onDisk, err := LocalRunner{}.ListDirectory(layout.Releases())
+	if err != nil {
+		t.Fatalf("listing releases: %v", err)
+	}
+	if len(onDisk) != 3 {
+		t.Errorf("release directories on disk = %v, want three", onDisk)
+	}
+	if slices.Contains(onDisk, oldest) {
+		t.Errorf("the oldest release %q should have been pruned from disk", oldest)
 	}
 }
 
