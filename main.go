@@ -32,6 +32,8 @@ func run(args []string) int {
 			return runReleases(args[1:])
 		case "env":
 			return runEnv(args[1:])
+		case "rollback":
+			return runRollback(args[1:])
 		default:
 			fatal("unknown command %q, run deploy -h for the list", args[0])
 			return exitPreconditionNotMet
@@ -56,6 +58,30 @@ func runDeploy(args []string) int {
 	}
 
 	exitCode, err := RunDeploy(options)
+	if err != nil {
+		fatal("%v", err)
+	}
+
+	return exitCode
+}
+
+func runRollback(args []string) int {
+	requested := ""
+	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		requested, args = args[0], args[1:]
+	}
+
+	flags := newFlagSet("rollback")
+	options := DeployOptions{}
+	stringFlag(flags, &options.Context, "context", "C", "", "scope deploy to this path instead of the cwd")
+	stringFlag(flags, &options.Destination, "destination", "D", "", "where the project gets deployed")
+	stringFlag(flags, &options.Environment, "environment", "e", defaultEnvironmentName, "environment to resolve")
+	flags.BoolVar(&options.ForceUnlock, "force-unlock", false, "break a stale deploy.lock")
+	if keepGoing, exitCode := parseCommandFlags(flags, args); !keepGoing {
+		return exitCode
+	}
+
+	exitCode, err := RunRollback(options, requested)
 	if err != nil {
 		fatal("%v", err)
 	}
@@ -180,6 +206,8 @@ usage:
   deploy check [flags]    validate the config, print it, change nothing
   deploy releases         releases on the destination, current one marked
   deploy env push <file>  upload an env file to the destination
+  deploy rollback [<commit>]
+                          activate a retained release, default the previous one
 
 flags:
   -C, --context <path>      scope deploy to this path instead of the cwd
