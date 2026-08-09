@@ -26,6 +26,9 @@ const (
 var commitPattern = regexp.MustCompile(`^[0-9a-f]{7,40}$`)
 
 type State struct {
+	// Name is here so deploy list can say what a project is without reading a
+	// config it has no path to. A destination full of hex ids is unreadable.
+	Name        string    `json:"name,omitempty"`
 	Current     string    `json:"current"`
 	Previous    string    `json:"previous,omitempty"`
 	Environment string    `json:"environment"`

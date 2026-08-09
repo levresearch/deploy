@@ -168,6 +168,21 @@ func (runner *SSHRunner) RemoveAll(target string) error {
 	return nil
 }
 
+// Interactive needs -t or the far side allocates no tty, and a shell without one
+// has no prompt, no job control, and no working ctrl-c.
+func (runner *SSHRunner) Interactive(command []string) error {
+	process := exec.Command("ssh",
+		"-t",
+		"-o", "ControlPath="+runner.controlPath,
+		runner.host, ShellCommand(command),
+	)
+	process.Stdin = os.Stdin
+	process.Stdout = os.Stdout
+	process.Stderr = os.Stderr
+
+	return process.Run()
+}
+
 func (runner *SSHRunner) Pipe(command []string, input io.Reader) error {
 	process := runner.ssh(ShellCommand(command))
 	process.Stdin = input

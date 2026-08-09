@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"io"
+	"io/fs"
 	"strings"
 	"testing"
 )
@@ -16,6 +17,8 @@ type scriptedRunner struct {
 	absentBinaries []string
 	failCommands   []string
 	directory      []string
+	directories    map[string][]string
+	files          map[string]string
 	ran            []string
 }
 
@@ -72,12 +75,40 @@ func (runner *scriptedRunner) Stream(command []string, _ io.Writer) error {
 	return err
 }
 
-func (runner *scriptedRunner) MkdirAll(string) error           { return nil }
-func (runner *scriptedRunner) WriteFile(string, []byte) error  { return nil }
-func (runner *scriptedRunner) ReadFile(string) ([]byte, error) { return nil, nil }
-func (runner *scriptedRunner) RemoveAll(string) error          { return nil }
-func (runner *scriptedRunner) Pipe([]string, io.Reader) error  { return nil }
-func (runner *scriptedRunner) ListDirectory(string) ([]string, error) {
+func (runner *scriptedRunner) MkdirAll(string) error          { return nil }
+func (runner *scriptedRunner) RemoveAll(string) error         { return nil }
+func (runner *scriptedRunner) Pipe([]string, io.Reader) error { return nil }
+func (runner *scriptedRunner) Interactive(command []string) error {
+	runner.ran = append(runner.ran, strings.Join(command, " "))
+
+	return nil
+}
+
+func (runner *scriptedRunner) WriteFile(name string, contents []byte) error {
+	if runner.files == nil {
+		runner.files = map[string]string{}
+	}
+	runner.files[name] = string(contents)
+
+	return nil
+}
+
+// ReadFile answers a missing file the way the real ones do, since callers tell
+// "never deployed" from "something is wrong" by exactly that error.
+func (runner *scriptedRunner) ReadFile(name string) ([]byte, error) {
+	contents, found := runner.files[name]
+	if !found {
+		return nil, fs.ErrNotExist
+	}
+
+	return []byte(contents), nil
+}
+
+func (runner *scriptedRunner) ListDirectory(directory string) ([]string, error) {
+	if listing, found := runner.directories[directory]; found {
+		return listing, nil
+	}
+
 	return runner.directory, nil
 }
 

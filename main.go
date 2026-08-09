@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"slices"
 	"strings"
 )
 
@@ -34,6 +35,16 @@ func run(args []string) int {
 			return runEnv(args[1:])
 		case "rollback":
 			return runRollback(args[1:])
+		case "status":
+			return runInspect(args[1:], "status")
+		case "list":
+			return runInspect(args[1:], "list")
+		case "logs":
+			return runInspect(args[1:], "logs")
+		case "shell":
+			return runInspect(args[1:], "shell")
+		case "exec":
+			return runInspect(args[1:], "exec")
 		default:
 			fatal("unknown command %q, run deploy -h for the list", args[0])
 			return exitPreconditionNotMet
@@ -58,6 +69,65 @@ func runDeploy(args []string) int {
 	}
 
 	exitCode, err := RunDeploy(options)
+	if err != nil {
+		fatal("%v", err)
+	}
+
+	return exitCode
+}
+
+// runInspect covers the read-only commands, which share every flag and differ
+// only in what they do with the service they were pointed at.
+func runInspect(args []string, command string) int {
+	// everything after -- belongs to the container, not to deploy
+	inside := []string{}
+	if separator := slices.Index(args, "--"); separator >= 0 {
+		inside = args[separator+1:]
+		args = args[:separator]
+	}
+
+	serviceName := ""
+	if slices.Contains([]string{"logs", "shell", "exec"}, command) {
+		if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+			serviceName, args = args[0], args[1:]
+		}
+	}
+
+	flags := newFlagSet(command)
+	options := DeployOptions{}
+	follow := false
+	stringFlag(flags, &options.Context, "context", "C", "", "scope deploy to this path instead of the cwd")
+	stringFlag(flags, &options.Destination, "destination", "D", "", "where the project gets deployed")
+	stringFlag(flags, &options.Environment, "environment", "e", defaultEnvironmentName, "environment to resolve")
+	if command == "logs" {
+		flags.BoolVar(&follow, "follow", false, "keep printing as more arrives")
+		flags.BoolVar(&follow, "f", false, "keep printing as more arrives")
+	}
+	if keepGoing, exitCode := parseCommandFlags(flags, args); !keepGoing {
+		return exitCode
+	}
+
+	if serviceName == "" && slices.Contains([]string{"logs", "shell", "exec"}, command) {
+		fatal("which service? try deploy %s <service>", command)
+		return exitPreconditionNotMet
+	}
+
+	var exitCode int
+	var err error
+
+	switch command {
+	case "status":
+		exitCode, err = RunStatus(options)
+	case "list":
+		exitCode, err = RunList(options)
+	case "logs":
+		exitCode, err = RunLogs(options, serviceName, follow)
+	case "shell":
+		exitCode, err = RunShell(options, serviceName)
+	case "exec":
+		exitCode, err = RunExec(options, serviceName, inside)
+	}
+
 	if err != nil {
 		fatal("%v", err)
 	}
@@ -204,6 +274,11 @@ func printUsage() {
 usage:
   deploy [flags]          deploy the current commit
   deploy check [flags]    validate the config, print it, change nothing
+  deploy status           current release, per service health, what is exposed
+  deploy list             every project on the destination, not just this one
+  deploy logs [-f] <svc>  tail a service
+  deploy shell <svc>      a shell inside the running container
+  deploy exec <svc> -- .. run one command inside it
   deploy releases         releases on the destination, current one marked
   deploy env push <file>  upload an env file to the destination
   deploy rollback [<commit>]

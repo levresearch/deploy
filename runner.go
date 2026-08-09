@@ -68,6 +68,9 @@ type Runner interface {
 	// Pipe feeds a local stream into a command running wherever the runner runs,
 	// which is how a release tar and an image tarball both get across.
 	Pipe(command []string, input io.Reader) error
+	// Interactive hands this terminal to a command on the other side, which a
+	// shell is useless without.
+	Interactive(command []string) error
 }
 
 // OpenRunner picks where the work happens. The returned close is what tears down
@@ -134,6 +137,15 @@ func (LocalRunner) ListDirectory(path string) ([]string, error) {
 
 func (LocalRunner) RemoveAll(path string) error {
 	return os.RemoveAll(path)
+}
+
+func (LocalRunner) Interactive(command []string) error {
+	process := exec.Command(command[0], command[1:]...)
+	process.Stdin = os.Stdin
+	process.Stdout = os.Stdout
+	process.Stderr = os.Stderr
+
+	return process.Run()
 }
 
 func (LocalRunner) Pipe(command []string, input io.Reader) error {

@@ -187,6 +187,7 @@ func RunDeploy(options DeployOptions) (int, error) {
 	// everything past here has already put the new release in service, so a
 	// failure is reported and never rolled back
 	state = state.RecordRelease(commit, resolved.Environment)
+	state.Name = resolved.Name
 	state, pruneErr := PruneReleases(runner, layout, resolved.ID, state, resolved.Retention)
 
 	if err := WriteState(runner, layout, state); err != nil {
