@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"path"
@@ -32,6 +33,12 @@ func (layout Layout) Releases() string {
 
 func (layout Layout) Release(commit string) string {
 	return path.Join(layout.Releases(), ShortCommit(commit))
+}
+
+// SharedComposeFile sits beside releases rather than inside one, since the stack
+// it describes outlives every release and must never be pruned with one.
+func (layout Layout) SharedComposeFile() string {
+	return path.Join(layout.Root, "shared", composeFileName)
 }
 
 func RunDeploy(options DeployOptions) (int, error) {
@@ -117,8 +124,12 @@ func RunDeploy(options DeployOptions) (int, error) {
 		return exitDeployFailed, err
 	}
 
+	if err := startShared(runner, layout, resolved); err != nil {
+		return exitDeployFailed, err
+	}
+
 	composeFile := path.Join(releaseDirectory, composeFileName)
-	rendered, err := RenderCompose(resolved, commit)
+	rendered, err := RenderRelease(resolved, commit)
 	if err != nil {
 		return exitDeployFailed, err
 	}
@@ -126,7 +137,7 @@ func RunDeploy(options DeployOptions) (int, error) {
 		return exitDeployFailed, err
 	}
 
-	if err := startStack(runner, resolved, composeFile, commit); err != nil {
+	if err := startStack(runner, composeFile, ProjectName(resolved.ID, commit)); err != nil {
 		return exitDeployFailed, err
 	}
 	fmt.Printf("  %s is up\n", ProjectName(resolved.ID, commit))
@@ -273,8 +284,58 @@ func buildServices(runner Runner, resolved ResolvedProject, repositoryPath, comm
 	return nil
 }
 
-func startStack(runner Runner, resolved ResolvedProject, composeFile, commit string) error {
-	projectName := ProjectName(resolved.ID, commit)
+// startShared brings up the stack that outlives every release. It is rendered
+// every deploy and compared with what is already there, because "bring it up if
+// it is not running" would mean a changed postgres image, a new volume, or an
+// edited command silently never taking effect.
+func startShared(runner Runner, layout Layout, resolved ResolvedProject) error {
+	if _, err := runner.Run([]string{"docker", "network", "create", NetworkName(resolved.ID)}); err != nil {
+		// already existing is the normal case and the only one worth ignoring, so
+		// a real failure surfaces when the stack cannot reach the network
+		_ = err
+	}
+	for _, volume := range VolumesFor(resolved) {
+		if _, err := runner.Run([]string{"docker", "volume", "create", volume}); err != nil {
+			return fmt.Errorf("creating volume %s: %w", volume, err)
+		}
+	}
+
+	stateful, _ := SplitServices(resolved.Services)
+	if len(stateful) == 0 {
+		return nil
+	}
+
+	rendered, err := RenderShared(resolved)
+	if err != nil {
+		return err
+	}
+
+	sharedFile := layout.SharedComposeFile()
+	previous, _ := runner.ReadFile(sharedFile)
+
+	if len(previous) > 0 && !bytes.Equal(previous, rendered) {
+		fmt.Printf(
+			"  shared stack changed, so %s will be recreated. stateful services take a real outage here\n",
+			strings.Join(ServiceNames(stateful), ", "),
+		)
+	}
+
+	if err := runner.MkdirAll(path.Dir(sharedFile)); err != nil {
+		return err
+	}
+	if err := runner.WriteFile(sharedFile, rendered); err != nil {
+		return err
+	}
+
+	if err := startStack(runner, sharedFile, SharedProjectName(resolved.ID)); err != nil {
+		return err
+	}
+	fmt.Printf("  shared stack up (%s)\n", strings.Join(ServiceNames(stateful), ", "))
+
+	return nil
+}
+
+func startStack(runner Runner, composeFile, projectName string) error {
 	up := []string{
 		"docker", "compose",
 		"--file", composeFile,

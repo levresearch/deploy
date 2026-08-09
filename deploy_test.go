@@ -238,23 +238,18 @@ func TestRenderComposeGoldenOutput(t *testing.T) {
     }`
 
 	resolved := loadAndResolve(t, contents, defaultEnvironmentName)
-	rendered, err := RenderCompose(resolved, "9f4be0affffffffffffffffffffffffffffffffff")
+	rendered, err := RenderRelease(resolved, "9f4be0affffffffffffffffffffffffffffffffff")
 	if err != nil {
 		t.Fatalf("RenderCompose: %v", err)
 	}
 
+	// pg is stateful so it lives in the shared stack, and the dependency on it is
+	// dropped because compose cannot wait on a service another project owns. That
+	// ordering is guaranteed instead by the shared stack being up first.
 	const want = `{
   "name": "deploy-a3f19c02-9f4be0a",
   "services": {
-    "pg": {
-      "image": "postgres:17"
-    },
     "web": {
-      "depends_on": {
-        "pg": {
-          "condition": "service_healthy"
-        }
-      },
       "env_file": [
         ".env.production"
       ],
@@ -271,6 +266,12 @@ func TestRenderComposeGoldenOutput(t *testing.T) {
       "image": "deploy-a3f19c02/web:9f4be0a",
       "restart": "unless-stopped"
     }
+  },
+  "networks": {
+    "default": {
+      "external": true,
+      "name": "deploy-a3f19c02-net"
+    }
   }
 }
 `
@@ -286,7 +287,7 @@ func TestRenderComposeNeverEmitsABuildKey(t *testing.T) {
       "services": {"web": {"build": {"dockerfile": "Dockerfile"}}}
     }`
 
-	rendered, err := RenderCompose(loadAndResolve(t, contents, defaultEnvironmentName), "abcdef1234")
+	rendered, err := RenderRelease(loadAndResolve(t, contents, defaultEnvironmentName), "abcdef1234")
 	if err != nil {
 		t.Fatalf("RenderCompose: %v", err)
 	}

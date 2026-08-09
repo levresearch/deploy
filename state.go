@@ -196,6 +196,12 @@ func PruneReleases(runner Runner, layout Layout, projectID string, state State, 
 		if err := resolvedWithinRoot(layout.Releases(), directory); err != nil {
 			return state, err
 		}
+
+		// the containers have to go before the directory does, since the compose
+		// file that names them lives inside it, and removing the directory first
+		// would strand them running with no way left to address them
+		stopRelease(runner, projectID, commit, path.Join(directory, composeFileName))
+
 		if err := runner.RemoveAll(directory); err != nil {
 			return state, fmt.Errorf("pruning %s: %w", directory, err)
 		}
@@ -209,6 +215,21 @@ func PruneReleases(runner Runner, layout Layout, projectID string, state State, 
 	}
 
 	return state, nil
+}
+
+// stopRelease tears down a release's containers. Best effort, since a stack that
+// is already gone is the normal case, and the images cannot be removed while
+// anything still holds them.
+func stopRelease(runner Runner, projectID, commit, composeFile string) {
+	down := []string{
+		"docker", "compose",
+		"--file", composeFile,
+		"--project-name", ProjectName(projectID, commit),
+		"down",
+	}
+	if _, err := runner.Run(down); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: could not stop the containers for release %s: %v\n", commit, err)
+	}
 }
 
 // pruneImages is best effort on purpose. A left over image wastes disk, and
