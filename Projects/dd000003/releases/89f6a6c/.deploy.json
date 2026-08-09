@@ -1,4 +1,0 @@
-{
-      "version": 1, "id": "dd000003", "name": "remote",
-      "services": {"app": {"image": "busybox:latest"}}
-    }

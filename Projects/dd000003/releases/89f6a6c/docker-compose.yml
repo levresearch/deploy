@@ -1,8 +1,0 @@
-{
-  "name": "deploy-dd000003-89f6a6c",
-  "services": {
-    "app": {
-      "image": "busybox:latest"
-    }
-  }
-}

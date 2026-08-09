@@ -1,0 +1,80 @@
+# Two jobs on purpose. The fast one is what tells you a push is broken, and it
+# finishes in seconds. The slow one drives real containers and takes minutes, so
+# it runs alongside rather than in front of it.
+name: check
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  fast:
+    name: format, vet, and unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          # from go.mod, so this never drifts from what the module asks for
+          go-version-file: go.mod
+
+      - name: gofmt
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "these files are not gofmt clean:"
+            echo "$unformatted"
+            gofmt -d .
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: build
+        run: go build ./...
+
+      # CONTRIBUTING makes this a hard requirement and says there is no CI to
+      # enforce it. There is now.
+      - name: ascii only
+        run: |
+          # git grep searches tracked content, so it needs no file list and
+          # cannot trip over something ignored or not checked out
+          if git grep -nP '[^\x00-\x7F]' -- . ; then
+            echo
+            echo "the lines above contain characters that are not on a US keyboard."
+            echo "use - for dashes, ' and \" for quotes, ... for an ellipsis, -> for an arrow."
+            exit 1
+          fi
+
+      - name: unit tests
+        run: go test -short ./...
+
+  integration:
+    name: real containers
+    runs-on: ubuntu-latest
+    # a dozen of these drive docker end to end, so give them room rather than
+    # letting the default cut one off mid-deploy and look like a flake
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      # cross architecture builds need QEMU registered and a builder on the
+      # docker-container driver. without these the cross-arch tests skip, which
+      # would quietly stop covering the thing they exist for
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - name: docker is reachable
+        run: |
+          docker info
+          docker compose version
+          docker buildx inspect --bootstrap | grep -i platforms
+
+      - name: full test suite
+        run: go test ./...
