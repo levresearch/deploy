@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"maps"
+	"path"
 	"slices"
 	"strings"
 )
@@ -78,25 +79,25 @@ func SplitServices(services map[string]Service) (stateful, stateless map[string]
 
 // RenderShared is the stack that outlives every release. It owns the volumes, so
 // nothing here is ever renamed and nothing here is pruned.
-func RenderShared(resolved ResolvedProject) ([]byte, error) {
+func RenderShared(resolved ResolvedProject, layout Layout) ([]byte, error) {
 	stateful, _ := SplitServices(resolved.Services)
 
-	return renderProject(resolved, SharedProjectName(resolved.ID), stateful, "")
+	return renderProject(resolved, layout, SharedProjectName(resolved.ID), stateful, "")
 }
 
 // RenderRelease is the per-commit stack. It declares no volumes of its own, and
 // any it references belong to the shared stack.
-func RenderRelease(resolved ResolvedProject, commit string) ([]byte, error) {
+func RenderRelease(resolved ResolvedProject, layout Layout, commit string) ([]byte, error) {
 	_, stateless := SplitServices(resolved.Services)
 
-	return renderProject(resolved, ProjectName(resolved.ID, commit), stateless, commit)
+	return renderProject(resolved, layout, ProjectName(resolved.ID, commit), stateless, commit)
 }
 
 // RenderReleaseTasks is a stack nothing ever brings up. Each task is started one
 // at a time with compose run, which is what gives them env files, volumes, and
 // the shared network without any of it being restated here.
-func RenderReleaseTasks(resolved ResolvedProject, commit string) ([]byte, error) {
-	return renderProject(resolved, ReleaseTasksProjectName(resolved.ID, commit), resolved.Release, commit)
+func RenderReleaseTasks(resolved ResolvedProject, layout Layout, commit string) ([]byte, error) {
+	return renderProject(resolved, layout, ReleaseTasksProjectName(resolved.ID, commit), resolved.Release, commit)
 }
 
 func ReleaseTasksProjectName(id, commit string) string {
@@ -105,6 +106,7 @@ func ReleaseTasksProjectName(id, commit string) string {
 
 func renderProject(
 	resolved ResolvedProject,
+	layout Layout,
 	projectName string,
 	services map[string]Service,
 	commit string,
@@ -113,7 +115,7 @@ func renderProject(
 	declaredVolumes := map[string]any{}
 
 	for _, name := range slices.Sorted(maps.Keys(services)) {
-		service, err := renderService(resolved, name, services[name], commit, services, declaredVolumes)
+		service, err := renderService(resolved, layout, name, services[name], commit, services, declaredVolumes)
 		if err != nil {
 			return nil, err
 		}
@@ -144,6 +146,7 @@ func renderProject(
 
 func renderService(
 	resolved ResolvedProject,
+	layout Layout,
 	name string,
 	service Service,
 	commit string,
@@ -165,7 +168,7 @@ func renderService(
 	}
 
 	if len(service.Env) > 0 {
-		if err := setField(fields, "env_file", service.Env); err != nil {
+		if err := setField(fields, "env_file", EnvFilePaths(layout, service.Env)); err != nil {
 			return nil, err
 		}
 	}
@@ -296,6 +299,23 @@ func VolumesFor(resolved ResolvedProject) []string {
 	}
 
 	return slices.Sorted(maps.Keys(found))
+}
+
+// EnvFilePaths sends a bare name to the project level env directory, where the
+// files actually live, since a gitignored .env is never in the release tree that
+// git archive placed. Anything written as a path is left alone, so a committed
+// file next to the code still works.
+func EnvFilePaths(layout Layout, declared []string) []string {
+	resolvedPaths := make([]string, 0, len(declared))
+	for _, entry := range declared {
+		if strings.ContainsRune(entry, '/') {
+			resolvedPaths = append(resolvedPaths, entry)
+			continue
+		}
+		resolvedPaths = append(resolvedPaths, path.Join(layout.EnvDirectory(), entry))
+	}
+
+	return resolvedPaths
 }
 
 func setField(fields map[string]json.RawMessage, name string, value any) error {

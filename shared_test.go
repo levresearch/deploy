@@ -43,11 +43,11 @@ const splitConfig = `{
 func TestStatefulGoesToSharedAndStatelessToTheRelease(t *testing.T) {
 	resolved := loadAndResolve(t, splitConfig, defaultEnvironmentName)
 
-	sharedRaw, err := RenderShared(resolved)
+	sharedRaw, err := RenderShared(resolved, NewLayout("/srv/projects", resolved.ID))
 	if err != nil {
 		t.Fatalf("RenderShared: %v", err)
 	}
-	releaseRaw, err := RenderRelease(resolved, "9f4be0affff")
+	releaseRaw, err := RenderRelease(resolved, NewLayout("/srv/projects", resolved.ID), "9f4be0affff")
 	if err != nil {
 		t.Fatalf("RenderRelease: %v", err)
 	}
@@ -79,8 +79,8 @@ func TestStatefulGoesToSharedAndStatelessToTheRelease(t *testing.T) {
 func TestOnlyTheSharedStackDeclaresVolumesAndTheyAreExternal(t *testing.T) {
 	resolved := loadAndResolve(t, splitConfig, defaultEnvironmentName)
 
-	sharedRaw, _ := RenderShared(resolved)
-	releaseRaw, _ := RenderRelease(resolved, "9f4be0affff")
+	sharedRaw, _ := RenderShared(resolved, NewLayout("/srv/projects", resolved.ID))
+	releaseRaw, _ := RenderRelease(resolved, NewLayout("/srv/projects", resolved.ID), "9f4be0affff")
 	shared, release := decodeCompose(t, sharedRaw), decodeCompose(t, releaseRaw)
 
 	if len(release.Volumes) != 0 {
@@ -105,7 +105,7 @@ func TestOnlyTheSharedStackDeclaresVolumesAndTheyAreExternal(t *testing.T) {
 func TestNamedVolumesAreQualifiedAndBindMountsAreNot(t *testing.T) {
 	resolved := loadAndResolve(t, splitConfig, defaultEnvironmentName)
 
-	sharedRaw, _ := RenderShared(resolved)
+	sharedRaw, _ := RenderShared(resolved, NewLayout("/srv/projects", resolved.ID))
 	shared := decodeCompose(t, sharedRaw)
 
 	var service struct {
@@ -131,8 +131,8 @@ func TestNamedVolumesAreQualifiedAndBindMountsAreNot(t *testing.T) {
 func TestBothStacksShareOneExternalNetwork(t *testing.T) {
 	resolved := loadAndResolve(t, splitConfig, defaultEnvironmentName)
 
-	sharedRaw, _ := RenderShared(resolved)
-	releaseRaw, _ := RenderRelease(resolved, "9f4be0affff")
+	sharedRaw, _ := RenderShared(resolved, NewLayout("/srv/projects", resolved.ID))
+	releaseRaw, _ := RenderRelease(resolved, NewLayout("/srv/projects", resolved.ID), "9f4be0affff")
 
 	for label, rendered := range map[string][]byte{"shared": sharedRaw, "release": releaseRaw} {
 		project := decodeCompose(t, rendered)
@@ -153,7 +153,7 @@ func TestBothStacksShareOneExternalNetwork(t *testing.T) {
 func TestDependsOnKeepsSiblingsAndDropsCrossProject(t *testing.T) {
 	resolved := loadAndResolve(t, splitConfig, defaultEnvironmentName)
 
-	releaseRaw, _ := RenderRelease(resolved, "9f4be0affff")
+	releaseRaw, _ := RenderRelease(resolved, NewLayout("/srv/projects", resolved.ID), "9f4be0affff")
 	release := decodeCompose(t, releaseRaw)
 
 	var web struct {
@@ -186,7 +186,7 @@ func TestAllThreeDependsOnConditionsTranslate(t *testing.T) {
       }
     }`
 
-	releaseRaw, _ := RenderRelease(loadAndResolve(t, contents, defaultEnvironmentName), "9f4be0a")
+	releaseRaw, _ := RenderRelease(loadAndResolve(t, contents, defaultEnvironmentName), NewLayout("/srv/projects", "a3f19c02"), "9f4be0a")
 	release := decodeCompose(t, releaseRaw)
 
 	var web struct {
@@ -213,12 +213,12 @@ func TestAllThreeDependsOnConditionsTranslate(t *testing.T) {
 func TestSharedStackRendersIdenticallyTwiceSoTheDiffIsANoOp(t *testing.T) {
 	resolved := loadAndResolve(t, splitConfig, defaultEnvironmentName)
 
-	first, err := RenderShared(resolved)
+	first, err := RenderShared(resolved, NewLayout("/srv/projects", resolved.ID))
 	if err != nil {
 		t.Fatalf("RenderShared: %v", err)
 	}
 	for range 5 {
-		again, err := RenderShared(resolved)
+		again, err := RenderShared(resolved, NewLayout("/srv/projects", resolved.ID))
 		if err != nil {
 			t.Fatalf("RenderShared: %v", err)
 		}
@@ -232,8 +232,8 @@ func TestAChangedSharedStackRendersDifferently(t *testing.T) {
 	before := loadAndResolve(t, splitConfig, defaultEnvironmentName)
 	after := loadAndResolve(t, strings.Replace(splitConfig, "postgres:17", "postgres:18", 1), defaultEnvironmentName)
 
-	beforeRaw, _ := RenderShared(before)
-	afterRaw, _ := RenderShared(after)
+	beforeRaw, _ := RenderShared(before, NewLayout("/srv/projects", before.ID))
+	afterRaw, _ := RenderShared(after, NewLayout("/srv/projects", after.ID))
 
 	if string(beforeRaw) == string(afterRaw) {
 		t.Fatal("changing a stateful service's image must show up as a change, or it would silently never take effect")

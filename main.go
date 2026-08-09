@@ -30,6 +30,8 @@ func run(args []string) int {
 			return runCheck(args[1:])
 		case "releases":
 			return runReleases(args[1:])
+		case "env":
+			return runEnv(args[1:])
 		default:
 			fatal("unknown command %q, run deploy -h for the list", args[0])
 			return exitPreconditionNotMet
@@ -52,6 +54,29 @@ func runDeploy(args []string) int {
 	}
 
 	exitCode, err := RunDeploy(options)
+	if err != nil {
+		fatal("%v", err)
+	}
+
+	return exitCode
+}
+
+func runEnv(args []string) int {
+	if len(args) < 2 || args[0] != "push" {
+		fatal("usage: deploy env push <file>")
+		return exitPreconditionNotMet
+	}
+
+	flags := newFlagSet("env push")
+	options := DeployOptions{}
+	stringFlag(flags, &options.Context, "context", "C", "", "scope deploy to this path instead of the cwd")
+	stringFlag(flags, &options.Destination, "destination", "D", "", "where the project gets deployed")
+	stringFlag(flags, &options.Environment, "environment", "e", defaultEnvironmentName, "environment to resolve")
+	if keepGoing, exitCode := parseCommandFlags(flags, args[2:]); !keepGoing {
+		return exitCode
+	}
+
+	exitCode, err := RunEnvPush(options, args[1])
 	if err != nil {
 		fatal("%v", err)
 	}
@@ -152,6 +177,7 @@ usage:
   deploy [flags]          deploy the current commit
   deploy check [flags]    validate the config, print it, change nothing
   deploy releases         releases on the destination, current one marked
+  deploy env push <file>  upload an env file to the destination
 
 flags:
   -C, --context <path>      scope deploy to this path instead of the cwd

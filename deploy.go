@@ -36,6 +36,13 @@ func (layout Layout) Release(commit string) string {
 	return path.Join(layout.Releases(), ShortCommit(commit))
 }
 
+// EnvDirectory holds the env files, which cannot ride along with the code
+// because git archive ships tracked files only and a real .env is gitignored.
+// Outside releases/, so pruning can never reach a secret.
+func (layout Layout) EnvDirectory() string {
+	return path.Join(layout.Root, "env")
+}
+
 // SharedComposeFile sits beside releases rather than inside one, since the stack
 // it describes outlives every release and must never be pruned with one.
 func (layout Layout) SharedComposeFile() string {
@@ -88,21 +95,27 @@ func RunDeploy(options DeployOptions) (int, error) {
 	if err != nil {
 		return exitPreconditionNotMet, err
 	}
-	if destination.IsRemote() {
-		return exitPreconditionNotMet, fmt.Errorf(
-			"destination %s is remote, and ssh transport is not implemented yet. point -D at a local path for now",
-			destination,
-		)
-	}
-
-	runner := LocalRunner{}
-	if err := CheckRequirements(runner); err != nil {
+	if err := CheckLocalRequirements(LocalRunner{}, destination); err != nil {
 		return exitPreconditionNotMet, err
 	}
 
-	fmt.Printf("deploying %s %s to %s\n", resolved.Name, ShortCommit(commit), destination)
+	runner, closeRunner, err := OpenRunner(destination)
+	if err != nil {
+		return exitPreconditionNotMet, err
+	}
+	defer closeRunner()
 
 	layout := NewLayout(destination.Path, resolved.ID)
+
+	facts, err := CheckDestination(runner, resolved, layout)
+	if err != nil {
+		return exitPreconditionNotMet, err
+	}
+
+	fmt.Printf(
+		"deploying %s %s to %s (%s)\n",
+		resolved.Name, ShortCommit(commit), destination, facts.Architecture,
+	)
 
 	lock, err := AcquireLock(runner, layout, commit, options.ForceUnlock)
 	if err != nil {
@@ -129,12 +142,12 @@ func RunDeploy(options DeployOptions) (int, error) {
 		return exitDeployFailed, err
 	}
 
-	if err := runReleaseTasks(runner, resolved, releaseDirectory, commit); err != nil {
+	if err := runReleaseTasks(runner, resolved, layout, releaseDirectory, commit); err != nil {
 		return exitDeployFailed, err
 	}
 
 	composeFile := path.Join(releaseDirectory, composeFileName)
-	rendered, err := RenderRelease(resolved, commit)
+	rendered, err := RenderRelease(resolved, layout, commit)
 	if err != nil {
 		return exitDeployFailed, err
 	}
@@ -195,13 +208,12 @@ func RunReleases(options DeployOptions) (int, error) {
 	if err != nil {
 		return exitPreconditionNotMet, err
 	}
-	if destination.IsRemote() {
-		return exitPreconditionNotMet, fmt.Errorf(
-			"destination %s is remote, and ssh transport is not implemented yet", destination,
-		)
+	runner, closeRunner, err := OpenRunner(destination)
+	if err != nil {
+		return exitPreconditionNotMet, err
 	}
+	defer closeRunner()
 
-	runner := LocalRunner{}
 	layout := NewLayout(destination.Path, resolved.ID)
 
 	state, err := ReadState(runner, layout)
@@ -235,6 +247,60 @@ func RunReleases(options DeployOptions) (int, error) {
 		fmt.Printf("%s%s%s\n", marker, release, note)
 	}
 	fmt.Printf("\n* current, - previous, keeping %d\n", resolved.Retention)
+
+	return exitOK, nil
+}
+
+// RunEnvPush places one env file on the destination. Separate from deploy because
+// a secret is not something to re-upload on every release, and because it is the
+// answer preflight points at when one is missing.
+func RunEnvPush(options DeployOptions, localPath string) (int, error) {
+	contents, err := os.ReadFile(localPath)
+	if err != nil {
+		return exitPreconditionNotMet, err
+	}
+
+	startPath := options.Context
+	if startPath == "" {
+		working, err := os.Getwd()
+		if err != nil {
+			return exitPreconditionNotMet, err
+		}
+		startPath = working
+	}
+
+	repositoryPath, err := FindRepository(startPath)
+	if err != nil {
+		return exitPreconditionNotMet, err
+	}
+
+	resolved, err := loadResolvedConfig(repositoryPath, options.Environment)
+	if err != nil {
+		return exitPreconditionNotMet, err
+	}
+
+	destinationText := options.Destination
+	if destinationText == "" {
+		destinationText = resolved.Destination
+	}
+	destination, err := ParseDestination(destinationText)
+	if err != nil {
+		return exitPreconditionNotMet, err
+	}
+
+	runner, closeRunner, err := OpenRunner(destination)
+	if err != nil {
+		return exitPreconditionNotMet, err
+	}
+	defer closeRunner()
+
+	layout := NewLayout(destination.Path, resolved.ID)
+	name := path.Base(localPath)
+
+	if err := PushEnvFile(runner, layout, name, contents); err != nil {
+		return exitDeployFailed, err
+	}
+	fmt.Printf("pushed %s to %s on %s\n", name, layout.EnvDirectory(), runner.Describe())
 
 	return exitOK, nil
 }
@@ -316,7 +382,7 @@ func startShared(runner Runner, layout Layout, resolved ResolvedProject) error {
 		return nil
 	}
 
-	rendered, err := RenderShared(resolved)
+	rendered, err := RenderShared(resolved, layout)
 	if err != nil {
 		return err
 	}
@@ -350,12 +416,12 @@ func startShared(runner Runner, layout Layout, resolved ResolvedProject) error {
 // against the shared stack that is already up. It happens before the new stack
 // starts, so a failure here means the old release is still serving and nothing
 // about the deploy has been applied.
-func runReleaseTasks(runner Runner, resolved ResolvedProject, releaseDirectory, commit string) error {
+func runReleaseTasks(runner Runner, resolved ResolvedProject, layout Layout, releaseDirectory, commit string) error {
 	if len(resolved.Release) == 0 {
 		return nil
 	}
 
-	rendered, err := RenderReleaseTasks(resolved, commit)
+	rendered, err := RenderReleaseTasks(resolved, layout, commit)
 	if err != nil {
 		return err
 	}

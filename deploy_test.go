@@ -238,7 +238,7 @@ func TestRenderComposeGoldenOutput(t *testing.T) {
     }`
 
 	resolved := loadAndResolve(t, contents, defaultEnvironmentName)
-	rendered, err := RenderRelease(resolved, "9f4be0affffffffffffffffffffffffffffffffff")
+	rendered, err := RenderRelease(resolved, NewLayout("/srv/projects", resolved.ID), "9f4be0affffffffffffffffffffffffffffffffff")
 	if err != nil {
 		t.Fatalf("RenderCompose: %v", err)
 	}
@@ -251,7 +251,7 @@ func TestRenderComposeGoldenOutput(t *testing.T) {
   "services": {
     "web": {
       "env_file": [
-        ".env.production"
+        "/srv/projects/a3f19c02/env/.env.production"
       ],
       "healthcheck": {
         "interval": "5s",
@@ -287,7 +287,8 @@ func TestRenderComposeNeverEmitsABuildKey(t *testing.T) {
       "services": {"web": {"build": {"dockerfile": "Dockerfile"}}}
     }`
 
-	rendered, err := RenderRelease(loadAndResolve(t, contents, defaultEnvironmentName), "abcdef1234")
+	resolvedProject := loadAndResolve(t, contents, defaultEnvironmentName)
+	rendered, err := RenderRelease(resolvedProject, NewLayout("/srv/projects", resolvedProject.ID), "abcdef1234")
 	if err != nil {
 		t.Fatalf("RenderCompose: %v", err)
 	}
@@ -459,7 +460,17 @@ func TestDeployRefusesADirtyTree(t *testing.T) {
 	}
 }
 
-func TestDeployRefusesARemoteDestinationForNow(t *testing.T) {
+// unreachableHost is deliberately in the reserved .invalid TLD, which RFC 2606
+// guarantees never resolves.
+//
+// NOTE: never put a plausible hostname in a test. An earlier version of this test
+// used "git:Projects" while remote destinations were still refused, so the string
+// was inert. Implementing ssh made it resolve through the developer's own
+// ~/.ssh/config and the test deployed to a real server. A name that cannot
+// resolve is what keeps that impossible rather than unlikely.
+const unreachableHost = "deploy-test.invalid"
+
+func TestAnUnreachableDestinationFailsBeforeAnythingIsPlaced(t *testing.T) {
 	repository := newRepository(t)
 	writeFile(t, repository, configFileName, `{
       "version": 1, "id": "dd000003", "name": "remote",
@@ -469,17 +480,22 @@ func TestDeployRefusesARemoteDestinationForNow(t *testing.T) {
 
 	exitCode, err := RunDeploy(DeployOptions{
 		Context:     repository,
-		Destination: "git:Projects",
+		Destination: unreachableHost + ":Projects",
 		Environment: defaultEnvironmentName,
 	})
 	if err == nil {
-		t.Fatal("a remote destination should be refused until ssh transport exists")
+		t.Fatal("a destination that cannot be reached must fail")
 	}
 	if exitCode != exitPreconditionNotMet {
-		t.Errorf("exit code = %d, want %d", exitCode, exitPreconditionNotMet)
+		t.Errorf("exit code = %d, want %d, since nothing was attempted", exitCode, exitPreconditionNotMet)
 	}
-	if !strings.Contains(err.Error(), "not implemented yet") {
-		t.Errorf("the refusal should say so honestly, got: %v", err)
+	if !strings.Contains(err.Error(), unreachableHost) {
+		t.Errorf("the error should name the host it could not reach, got: %v", err)
+	}
+	// opening the connection is what proves reachability, so this has to fail
+	// before a release is placed rather than halfway through one
+	if !strings.Contains(err.Error(), "ssh") {
+		t.Errorf("the error should say it was ssh that failed, got: %v", err)
 	}
 }
 

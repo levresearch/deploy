@@ -21,7 +21,7 @@ func TestReleaseTasksRenderIntoTheirOwnProjectOnTheSharedNetwork(t *testing.T) {
     }`
 
 	resolved := loadAndResolve(t, contents, defaultEnvironmentName)
-	rendered, err := RenderReleaseTasks(resolved, "9f4be0affff")
+	rendered, err := RenderReleaseTasks(resolved, NewLayout("/srv/projects", resolved.ID), "9f4be0affff")
 	if err != nil {
 		t.Fatalf("RenderReleaseTasks: %v", err)
 	}
@@ -61,8 +61,10 @@ func TestReleaseTasksRenderIntoTheirOwnProjectOnTheSharedNetwork(t *testing.T) {
 	if task.Command != "db:migrate" {
 		t.Errorf("command = %q, want it passed through", task.Command)
 	}
-	if len(task.EnvFile) != 1 || task.EnvFile[0] != ".env" {
-		t.Errorf("env_file = %v", task.EnvFile)
+	// a bare name points at the project level env directory, since a gitignored
+	// env file is never in the release tree git archive placed
+	if want := "/srv/projects/a3f19c02/env/.env"; len(task.EnvFile) != 1 || task.EnvFile[0] != want {
+		t.Errorf("env_file = %v, want [%s]", task.EnvFile, want)
 	}
 	// pg lives in the shared stack, so compose cannot wait on it from here
 	if task.DependsOn != nil {

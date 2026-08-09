@@ -68,6 +68,21 @@ type Runner interface {
 	ExtractTar(directory string, archive io.Reader) error
 }
 
+// OpenRunner picks where the work happens. The returned close is what tears down
+// the ssh connection, and is a no-op locally.
+func OpenRunner(destination Destination) (Runner, func(), error) {
+	if !destination.IsRemote() {
+		return LocalRunner{}, func() {}, nil
+	}
+
+	runner, err := NewSSHRunner(destination.Host)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return runner, runner.Close, nil
+}
+
 type LocalRunner struct{}
 
 func (LocalRunner) Describe() string {
@@ -128,45 +143,6 @@ func (LocalRunner) ExtractTar(directory string, archive io.Reader) error {
 
 	if err := extract.Run(); err != nil {
 		return fmt.Errorf("extracting into %s: %s", directory, strings.TrimSpace(failure.String()))
-	}
-
-	return nil
-}
-
-// requiredCommands are checked as a group so one run reports everything missing
-// rather than sending someone back around the loop per package.
-var requiredCommands = []struct {
-	packageName string
-	probe       []string
-}{
-	{"git", []string{"git", "--version"}},
-	{"tar", []string{"tar", "--version"}},
-	{"docker", []string{"docker", "--version"}},
-	{"docker compose plugin", []string{"docker", "compose", "version"}},
-}
-
-func CheckRequirements(runner Runner) error {
-	var missing []string
-	for _, requirement := range requiredCommands {
-		if _, err := runner.Run(requirement.probe); err != nil {
-			missing = append(missing, requirement.packageName)
-		}
-	}
-	if len(missing) > 0 {
-		return fmt.Errorf(
-			"Deploy needs you to install the following packages on %s in order to operate: %s",
-			runner.Describe(), strings.Join(missing, ", "),
-		)
-	}
-
-	// a present binary with an unreachable daemon is a different failure, and the
-	// more common one, since it catches a stopped daemon and a user who is not in
-	// the docker group
-	if output, err := runner.Run([]string{"docker", "info"}); err != nil {
-		return fmt.Errorf(
-			"docker is installed on %s but its daemon is not reachable: %s",
-			runner.Describe(), firstLine(output),
-		)
 	}
 
 	return nil
