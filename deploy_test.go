@@ -139,7 +139,7 @@ func TestPlaceReleaseShipsTheCommitAndNotTheWorkingTree(t *testing.T) {
 	}
 
 	release := filepath.Join(t.TempDir(), "release")
-	if err := PlaceRelease(LocalRunner{}, repository, commit, release); err != nil {
+	if err := PlaceRelease(LocalRunner{}, repository, Destination{}, Destination{}, commit, release); err != nil {
 		t.Fatalf("PlaceRelease: %v", err)
 	}
 
@@ -166,7 +166,7 @@ func TestPlaceReleaseShipsTheNamedCommitRatherThanHead(t *testing.T) {
 	commitFile(t, repository, "version.txt", "second")
 
 	release := filepath.Join(t.TempDir(), "release")
-	if err := PlaceRelease(LocalRunner{}, repository, older, release); err != nil {
+	if err := PlaceRelease(LocalRunner{}, repository, Destination{}, Destination{}, older, release); err != nil {
 		t.Fatalf("PlaceRelease: %v", err)
 	}
 

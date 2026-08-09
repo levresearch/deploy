@@ -45,6 +45,7 @@ func runDeploy(args []string) int {
 	flags := newFlagSet("deploy")
 	options := DeployOptions{}
 	stringFlag(flags, &options.Context, "context", "C", "", "scope deploy to this path instead of the cwd")
+	stringFlag(flags, &options.GitStorage, "git-storage", "G", "", "where the bare repo lives")
 	stringFlag(flags, &options.Destination, "destination", "D", "", "where the project gets deployed")
 	stringFlag(flags, &options.Environment, "environment", "e", defaultEnvironmentName, "environment to resolve")
 	flags.BoolVar(&options.AllowDirty, "allow-dirty", false, "deploy with uncommitted changes present")
@@ -182,6 +183,8 @@ usage:
 
 flags:
   -C, --context <path>      scope deploy to this path instead of the cwd
+  -G, --git-storage <path>  where the bare repo lives, which lets the
+                            destination extract without an upload
   -D, --destination <path>  where the project gets deployed
       --allow-dirty         deploy with uncommitted changes present
       --force-unlock        break a stale deploy.lock

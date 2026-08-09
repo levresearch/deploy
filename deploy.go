@@ -12,6 +12,7 @@ import (
 
 type DeployOptions struct {
 	Context     string
+	GitStorage  string
 	Destination string
 	Environment string
 	AllowDirty  bool
@@ -96,6 +97,12 @@ func RunDeploy(options DeployOptions) (int, error) {
 	if err != nil {
 		return exitPreconditionNotMet, err
 	}
+
+	gitStorage, err := resolveGitStorage(options.GitStorage, resolved.GitStorage)
+	if err != nil {
+		return exitPreconditionNotMet, err
+	}
+
 	if err := CheckLocalRequirements(LocalRunner{}, destination); err != nil {
 		return exitPreconditionNotMet, err
 	}
@@ -137,10 +144,16 @@ func RunDeploy(options DeployOptions) (int, error) {
 	}
 
 	releaseDirectory := layout.Release(commit)
-	if err := PlaceRelease(runner, repositoryPath, commit, releaseDirectory); err != nil {
+	if err := PlaceRelease(
+		runner, repositoryPath, gitStorage, destination, commit, releaseDirectory,
+	); err != nil {
 		return exitDeployFailed, err
 	}
-	fmt.Printf("  placed release in %s\n", releaseDirectory)
+	if gitStorage.Path != "" && SameHost(gitStorage, destination) {
+		fmt.Printf("  placed release in %s, straight from %s\n", releaseDirectory, gitStorage.Path)
+	} else {
+		fmt.Printf("  placed release in %s\n", releaseDirectory)
+	}
 
 	builder.SetReleaseDirectory(releaseDirectory)
 	if err := buildServices(builder, resolved, repositoryPath, commit); err != nil {
@@ -312,6 +325,20 @@ func RunEnvPush(options DeployOptions, localPath string) (int, error) {
 	fmt.Printf("pushed %s to %s on %s\n", name, layout.EnvDirectory(), runner.Describe())
 
 	return exitOK, nil
+}
+
+// resolveGitStorage is optional, so an unset one is not an error. It only ever
+// unlocks the faster path.
+func resolveGitStorage(fromFlag, fromConfig string) (Destination, error) {
+	raw := fromFlag
+	if raw == "" {
+		raw = fromConfig
+	}
+	if raw == "" {
+		return Destination{}, nil
+	}
+
+	return ParseDestination(raw)
 }
 
 func loadResolvedConfig(repositoryPath, environmentName string) (ResolvedProject, error) {

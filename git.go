@@ -67,14 +67,70 @@ func ShortCommit(commit string) string {
 	return commit
 }
 
-// PlaceRelease streams the tracked tree at commit straight into the destination,
-// so it never lands on disk in between. That tar is exactly what the commit
-// contains, which is what stops the release and the image disagreeing later.
-func PlaceRelease(runner Runner, repositoryPath, commit, releaseDirectory string) error {
+// SameHost decides whether the destination can extract from the bare repo
+// itself. Two local paths count, since they are both this machine.
+func SameHost(gitStorage, destination Destination) bool {
+	return gitStorage.Host == destination.Host
+}
+
+// PlaceRelease puts the tracked tree at commit into the release directory. When
+// the bare repo already lives on the destination nothing is uploaded at all,
+// which for a repo and a projects directory on one disk is every deploy.
+func PlaceRelease(
+	runner Runner,
+	repositoryPath string,
+	gitStorage Destination,
+	destination Destination,
+	commit, releaseDirectory string,
+) error {
 	if err := runner.MkdirAll(releaseDirectory); err != nil {
 		return fmt.Errorf("creating %s: %w", releaseDirectory, err)
 	}
 
+	if gitStorage.Path != "" && SameHost(gitStorage, destination) {
+		return placeFromBareRepository(runner, gitStorage.Path, commit, releaseDirectory)
+	}
+
+	return placeFromLocalRepository(runner, repositoryPath, commit, releaseDirectory)
+}
+
+// placeFromBareRepository never sends the source anywhere. The repo is already
+// sitting on the box that runs it, so the box extracts from itself and the only
+// thing that crosses the network is the instruction to do so.
+func placeFromBareRepository(runner Runner, bareRepositoryPath, commit, releaseDirectory string) error {
+	if !bareRepositoryHasCommit(runner, bareRepositoryPath, commit) {
+		return fmt.Errorf(
+			"%s is not in %s on %s, so push first and deploy again",
+			ShortCommit(commit), bareRepositoryPath, runner.Describe(),
+		)
+	}
+
+	extract := fmt.Sprintf(
+		"git --git-dir=%s archive --format=tar %s | tar -x -C %s",
+		ShellQuote(bareRepositoryPath), ShellQuote(commit), ShellQuote(releaseDirectory),
+	)
+	if output, err := runner.Run([]string{"sh", "-c", extract}); err != nil {
+		return fmt.Errorf(
+			"extracting %s from %s on %s: %s",
+			ShortCommit(commit), bareRepositoryPath, runner.Describe(), firstLine(output),
+		)
+	}
+
+	return nil
+}
+
+func bareRepositoryHasCommit(runner Runner, bareRepositoryPath, commit string) bool {
+	_, err := runner.Run([]string{
+		"git", "--git-dir=" + bareRepositoryPath, "cat-file", "-e", commit + "^{commit}",
+	})
+
+	return err == nil
+}
+
+// placeFromLocalRepository streams the tree straight across, so it never lands on
+// disk in between. This is the fallback for a repo that does not live on the
+// destination.
+func placeFromLocalRepository(runner Runner, repositoryPath, commit, releaseDirectory string) error {
 	reader, archiveFailed := startArchive(repositoryPath, commit)
 	defer reader.Close()
 
