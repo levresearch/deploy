@@ -356,3 +356,180 @@ func TestRollbackToAPrunedReleaseFailsWithoutTouchingAnything(t *testing.T) {
 		t.Error("a refused rollback must leave the current release running")
 	}
 }
+
+// One release stack at a time is the steady state. Without this, every deploy
+// leaves its predecessor running and a small box fills up with old stacks.
+func TestADeployStopsTheReleaseItReplaces(t *testing.T) {
+	dockerAvailable(t)
+
+	repository := newRepository(t)
+	writeFile(t, repository, configFileName, `{
+      "version": 1,
+      "id": "dd00000d",
+      "name": "superseded",
+      "retention": 3,
+      "services": {
+        "app": {
+          "image": "busybox:latest",
+          "stateful": false,
+          "command": ["sh", "-c", "sleep 300"],
+          "healthcheck": {"command": ["CMD", "true"], "interval": "1s", "retries": 5}
+        }
+      }
+    }`)
+
+	destination := t.TempDir()
+	t.Cleanup(func() { exec.Command("docker", "network", "rm", NetworkName("dd00000d")).Run() })
+
+	var commits []string
+	for round := range 3 {
+		commit := commitFile(t, repository, "round.txt", string(rune('a'+round)))
+		commits = append(commits, ShortCommit(commit))
+		t.Cleanup(func() {
+			exec.Command("docker", "compose", "--project-name", ProjectName("dd00000d", commit), "down").Run()
+		})
+
+		if _, err := RunDeploy(DeployOptions{
+			Context: repository, Destination: destination, Environment: defaultEnvironmentName,
+		}); err != nil {
+			t.Fatalf("deploy %d: %v", round+1, err)
+		}
+	}
+
+	running, err := exec.Command("docker", "ps", "--format", "{{.Names}}").Output()
+	if err != nil {
+		t.Fatalf("listing containers: %v", err)
+	}
+
+	newest := commits[len(commits)-1]
+	if !strings.Contains(string(running), ProjectName("dd00000d", newest)) {
+		t.Error("the newest release should be running")
+	}
+	for _, superseded := range commits[:len(commits)-1] {
+		if strings.Contains(string(running), ProjectName("dd00000d", superseded)) {
+			t.Errorf("release %s was replaced and should have been stopped", superseded)
+		}
+	}
+
+	// stopped is not removed, so rolling back is still just a compose up
+	if _, err := RunRollback(DeployOptions{
+		Context: repository, Destination: destination, Environment: defaultEnvironmentName,
+	}, ""); err != nil {
+		t.Fatalf("a stopped release must still be startable: %v", err)
+	}
+}
+
+// An exposed project keeps both stacks up, because stopping the old one before
+// the tunnel points at the new one is the outage the cutover exists to prevent.
+func TestAnExposedProjectKeepsTheOldStackUntilTheTunnelCanBeMoved(t *testing.T) {
+	dockerAvailable(t)
+
+	// a host block makes cloudflared a genuine requirement, which is the rule
+	// working rather than a problem, so skip where it is not installed
+	if err := exec.Command("cloudflared", "--version").Run(); err != nil {
+		t.Skip("cloudflared is not installed, and a hosted project requires it")
+	}
+
+	repository := newRepository(t)
+	writeFile(t, repository, configFileName, `{
+      "version": 1,
+      "id": "dd00000e",
+      "name": "exposed",
+      "retention": 3,
+      "services": {
+        "app": {
+          "image": "busybox:latest",
+          "stateful": false,
+          "command": ["sh", "-c", "sleep 300"],
+          "healthcheck": {"command": ["CMD", "true"], "interval": "1s", "retries": 5},
+          "host": {"domain": "example.com", "port": 80, "tunnelTokenFrom": "TOKEN"}
+        }
+      }
+    }`)
+
+	destination := t.TempDir()
+	t.Cleanup(func() { exec.Command("docker", "network", "rm", NetworkName("dd00000e")).Run() })
+
+	var commits []string
+	for round := range 2 {
+		commit := commitFile(t, repository, "round.txt", string(rune('a'+round)))
+		commits = append(commits, ShortCommit(commit))
+		t.Cleanup(func() {
+			exec.Command("docker", "compose", "--project-name", ProjectName("dd00000e", commit), "down").Run()
+		})
+
+		if _, err := RunDeploy(DeployOptions{
+			Context: repository, Destination: destination, Environment: defaultEnvironmentName,
+		}); err != nil {
+			t.Fatalf("deploy %d: %v", round+1, err)
+		}
+	}
+
+	running, err := exec.Command("docker", "ps", "--format", "{{.Names}}").Output()
+	if err != nil {
+		t.Fatalf("listing containers: %v", err)
+	}
+	for _, commit := range commits {
+		if !strings.Contains(string(running), ProjectName("dd00000e", commit)) {
+			t.Errorf("release %s should still be running, since nothing may be stopped before the tunnel moves", commit)
+		}
+	}
+}
+
+// Redeploying the commit that is already current must not stop the stack it just
+// started. Running deploy twice is an ordinary thing to do after a hiccup.
+func TestRedeployingTheSameCommitLeavesItRunning(t *testing.T) {
+	dockerAvailable(t)
+
+	repository := newRepository(t)
+	writeFile(t, repository, configFileName, `{
+      "version": 1,
+      "id": "dd00000f",
+      "name": "redeployed",
+      "services": {
+        "app": {
+          "image": "busybox:latest",
+          "stateful": false,
+          "command": ["sh", "-c", "sleep 300"],
+          "healthcheck": {"command": ["CMD", "true"], "interval": "1s", "retries": 5}
+        }
+      }
+    }`)
+
+	destination := t.TempDir()
+	commit := commitFile(t, repository, "round.txt", "a")
+
+	t.Cleanup(func() {
+		exec.Command("docker", "compose", "--project-name", ProjectName("dd00000f", commit), "down").Run()
+		exec.Command("docker", "network", "rm", NetworkName("dd00000f")).Run()
+	})
+
+	options := DeployOptions{
+		Context: repository, Destination: destination, Environment: defaultEnvironmentName,
+	}
+	for round := range 2 {
+		if _, err := RunDeploy(options); err != nil {
+			t.Fatalf("deploy %d: %v", round+1, err)
+		}
+	}
+
+	running, err := exec.Command("docker", "ps", "--format", "{{.Names}}").Output()
+	if err != nil {
+		t.Fatalf("listing containers: %v", err)
+	}
+	if !strings.Contains(string(running), ProjectName("dd00000f", commit)) {
+		t.Error("redeploying the current commit stopped the stack it had just started")
+	}
+
+	// and it is still its own rollback target problem, not a lost release
+	state, err := ReadState(LocalRunner{}, NewLayout(destination, "dd00000f"))
+	if err != nil {
+		t.Fatalf("ReadState: %v", err)
+	}
+	if state.Current != ShortCommit(commit) {
+		t.Errorf("current = %q, want %q", state.Current, ShortCommit(commit))
+	}
+	if state.Previous == state.Current {
+		t.Error("a redeploy made the release its own rollback target")
+	}
+}

@@ -182,6 +182,8 @@ func RunDeploy(options DeployOptions) (int, error) {
 	}
 	fmt.Printf("  %s is up\n", ProjectName(resolved.ID, commit))
 
+	retireSupersededRelease(runner, layout, resolved, state.Current, commit)
+
 	// everything past here has already put the new release in service, so a
 	// failure is reported and never rolled back
 	state = state.RecordRelease(commit, resolved.Environment)
@@ -383,6 +385,38 @@ func buildServices(builder *Builder, resolved ResolvedProject, repositoryPath, c
 	}
 
 	return nil
+}
+
+// retireSupersededRelease stops the release the new one just replaced, which only
+// happens after the new stack is up and --wait has already confirmed every
+// healthcheck passed. Leaving it running would pile up a stack per deploy, which
+// on a small box is real memory.
+//
+// NOTE: a project with a host block keeps both stacks up, because stopping the
+// old one before the tunnel has been pointed at the new one is precisely the
+// outage the cutover exists to avoid. That swap is not implemented yet, so this
+// deliberately does less rather than something unsafe.
+func retireSupersededRelease(
+	runner Runner,
+	layout Layout,
+	resolved ResolvedProject,
+	superseded, commit string,
+) {
+	if superseded == "" || superseded == ShortCommit(commit) {
+		return
+	}
+
+	if hosted := HostedServices(resolved.Services); len(hosted) > 0 {
+		fmt.Printf(
+			"  leaving %s running, since %s is exposed and the tunnel cutover is not implemented yet\n",
+			ProjectName(resolved.ID, superseded), strings.Join(hosted, ", "),
+		)
+
+		return
+	}
+
+	stopRelease(runner, resolved.ID, superseded, path.Join(layout.Release(superseded), composeFileName))
+	fmt.Printf("  stopped %s, which this release replaces\n", ProjectName(resolved.ID, superseded))
 }
 
 // startShared brings up the stack that outlives every release. It is rendered
