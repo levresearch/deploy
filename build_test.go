@@ -208,7 +208,7 @@ func TestBuildContextIsTheCommitAndNotTheWorkingTree(t *testing.T) {
 	tag := ImageTag("dd000009", "app", commit)
 	t.Cleanup(func() { exec.Command("docker", "image", "rm", "-f", tag).Run() })
 
-	if err := builder.Build(repository, commit, "app", "Dockerfile"); err != nil {
+	if err := builder.Build(repository, commit, "app", "Dockerfile", nil); err != nil {
 		t.Fatalf("Build: %v", err)
 	}
 
@@ -259,7 +259,7 @@ func TestCrossArchitectureBuildProducesAForeignImage(t *testing.T) {
 		os.RemoveAll(filepath.Join(repository, ".deploy"))
 	})
 
-	if err := builder.Build(repository, commit, "app", "Dockerfile"); err != nil {
+	if err := builder.Build(repository, commit, "app", "Dockerfile", nil); err != nil {
 		t.Fatalf("cross build: %v", err)
 	}
 

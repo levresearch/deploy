@@ -392,10 +392,24 @@ func TestPruningStopsTheContainersOfThePrunedRelease(t *testing.T) {
 		t.Errorf("containers from the pruned release %s are still running", pruned)
 	}
 
-	// and the two retained releases are untouched
+	// the newest release is the one serving. the one before it was retired when
+	// this release replaced it, which is stopped rather than removed, so it is
+	// still on disk and still something rollback can start
+	if newest := commits[len(commits)-1]; !strings.Contains(string(running), ProjectName("dd000006", newest)) {
+		t.Errorf("release %s should be running", ShortCommit(newest))
+	}
+
+	layout := NewLayout(destination, "dd000006")
+	onDisk, err := LocalRunner{}.ListDirectory(layout.Releases())
+	if err != nil {
+		t.Fatalf("listing releases: %v", err)
+	}
+	if slices.Contains(onDisk, ShortCommit(commits[0])) {
+		t.Errorf("the pruned release %s should be gone from disk", ShortCommit(commits[0]))
+	}
 	for _, kept := range commits[1:] {
-		if !strings.Contains(string(running), ProjectName("dd000006", kept)) {
-			t.Errorf("release %s should still be running", ShortCommit(kept))
+		if !slices.Contains(onDisk, ShortCommit(kept)) {
+			t.Errorf("release %s is retained and should still be on disk", ShortCommit(kept))
 		}
 	}
 }

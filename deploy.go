@@ -375,11 +375,11 @@ func buildServices(builder *Builder, resolved ResolvedProject, repositoryPath, c
 			continue
 		}
 
-		dockerfile, err := dockerfilePath(name, service)
+		dockerfile, extraContext, err := buildPlan(name, service)
 		if err != nil {
 			return err
 		}
-		if err := builder.Build(repositoryPath, commit, name, dockerfile); err != nil {
+		if err := builder.Build(repositoryPath, commit, name, dockerfile, extraContext); err != nil {
 			return err
 		}
 	}

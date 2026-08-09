@@ -309,38 +309,48 @@ func TestRenderComposeNeverEmitsABuildKey(t *testing.T) {
 	}
 }
 
-func TestDockerfilePathReadsBothForms(t *testing.T) {
+func TestBuildPlanReadsEveryFormOfBuildBlock(t *testing.T) {
 	cases := []struct {
-		name  string
-		build string
-		want  string
+		name           string
+		build          string
+		wantDockerfile string
+		wantGenerated  bool
 	}{
-		{"object form", `{"dockerfile": "Dockerfile.worker"}`, "Dockerfile.worker"},
-		{"string form", `"Dockerfile"`, "Dockerfile"},
+		{"object form", `{"dockerfile": "Dockerfile.worker"}`, "Dockerfile.worker", false},
+		{"string form", `"Dockerfile"`, "Dockerfile", false},
+		{
+			name:           "inline form renders one",
+			build:          `{"from": "node:24-slim", "start": "npm start"}`,
+			wantDockerfile: generatedDockerfileName("web"),
+			wantGenerated:  true,
+		},
 	}
 
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
-			got, err := dockerfilePath("web", Service{Build: json.RawMessage(testCase.build)})
+			dockerfile, extra, err := buildPlan("web", Service{Build: json.RawMessage(testCase.build)})
 			if err != nil {
-				t.Fatalf("dockerfilePath: %v", err)
+				t.Fatalf("buildPlan: %v", err)
 			}
-			if got != testCase.want {
-				t.Errorf("got %q, want %q", got, testCase.want)
+			if dockerfile != testCase.wantDockerfile {
+				t.Errorf("dockerfile = %q, want %q", dockerfile, testCase.wantDockerfile)
+			}
+			if generated := len(extra) > 0; generated != testCase.wantGenerated {
+				t.Errorf("generated a Dockerfile = %v, want %v", generated, testCase.wantGenerated)
+			}
+			if testCase.wantGenerated {
+				if _, found := extra[dockerfile]; !found {
+					t.Errorf("the generated file should be in the context as %q, got %v", dockerfile, extra)
+				}
 			}
 		})
 	}
 
-	// the inline build description is task 11, and half handling it would be worse
-	// than refusing it
-	if _, err := dockerfilePath("web", Service{Build: json.RawMessage(`{"from": "node:24"}`)}); err == nil {
-		t.Error("an inline build block should be refused until it is implemented")
+	if _, _, err := buildPlan("web", Service{Build: json.RawMessage(`{}`)}); err == nil {
+		t.Error("a build block that says neither how nor from what should be refused")
 	}
 }
 
-// dockerAvailable gates every test that drives real containers. Those are the
-// only slow ones, so -short is the fast loop and a full run is what proves it
-// actually works.
 func dockerAvailable(t *testing.T) {
 	t.Helper()
 

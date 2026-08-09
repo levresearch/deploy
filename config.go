@@ -76,29 +76,44 @@ func (service Service) IsStateful() bool {
 	return service.Stateful != nil && *service.Stateful
 }
 
-// dockerfilePath reads the two forms build can take, a bare path or an object
-// naming one. The inline build description is task 11 and is refused here rather
-// than half handled.
-func dockerfilePath(serviceName string, service Service) (string, error) {
+// buildPlan works out how one service gets built, which is either a Dockerfile
+// somebody wrote or one deploy renders from the inline shorthand. The generated
+// file is returned as context to add rather than written anywhere, so nobody's
+// checkout grows a file they did not put there.
+func buildPlan(serviceName string, service Service) (dockerfile string, extraContext map[string][]byte, err error) {
+	inline, isInline, err := ParseInlineBuild(service.Build)
+	if err != nil {
+		return "", nil, fmt.Errorf("service %q: %w", serviceName, err)
+	}
+	if isInline {
+		rendered, err := inline.RenderDockerfile(serviceName)
+		if err != nil {
+			return "", nil, err
+		}
+		name := generatedDockerfileName(serviceName)
+
+		return name, map[string][]byte{name: []byte(rendered)}, nil
+	}
+
 	var asPath string
 	if err := json.Unmarshal(service.Build, &asPath); err == nil {
-		return asPath, nil
+		return asPath, nil, nil
 	}
 
 	var asObject struct {
 		Dockerfile string `json:"dockerfile"`
 	}
 	if err := json.Unmarshal(service.Build, &asObject); err != nil {
-		return "", fmt.Errorf("service %q has an unreadable build block: %w", serviceName, err)
+		return "", nil, fmt.Errorf("service %q has an unreadable build block: %w", serviceName, err)
 	}
 	if asObject.Dockerfile == "" {
-		return "", fmt.Errorf(
-			"service %q has a build block with no dockerfile, and describing a build inline is not implemented yet",
+		return "", nil, fmt.Errorf(
+			"service %q has a build block with neither a dockerfile nor a from, so deploy cannot tell how to build it",
 			serviceName,
 		)
 	}
 
-	return asObject.Dockerfile, nil
+	return asObject.Dockerfile, nil, nil
 }
 
 // serviceFields is the marshalling shape of the keys deploy owns. Service itself
@@ -331,6 +346,15 @@ func validateService(name string, service Service, resolved ResolvedProject) []e
 		problems = append(problems, fmt.Errorf(
 			"service %q sets neither image nor build", name,
 		))
+	}
+
+	// the build block is worked out here as well as at build time, so a config
+	// that cannot be built is refused by deploy check rather than three steps into
+	// a deploy
+	if hasBuild {
+		if _, _, err := buildPlan(name, service); err != nil {
+			problems = append(problems, err)
+		}
 	}
 
 	if service.Host != nil {

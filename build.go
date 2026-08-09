@@ -1,13 +1,17 @@
 package main
 
 import (
+	"archive/tar"
 	"bytes"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"os/exec"
 	"path"
+	"slices"
 	"strings"
+	"time"
 )
 
 // buildxBuilderHint and qemuHint are printed verbatim, because a FATAL that names
@@ -129,15 +133,18 @@ func (builder *Builder) Describe() string {
 
 // Build makes one image from the tracked tree at a commit and puts it where the
 // destination can run it.
-func (builder *Builder) Build(repositoryPath, commit, serviceName, dockerfile string) error {
+func (builder *Builder) Build(
+	repositoryPath, commit, serviceName, dockerfile string,
+	extraContext map[string][]byte,
+) error {
 	tag := ImageTag(builder.projectID, serviceName, commit)
 	fmt.Printf("  building %s (%s)\n", tag, builder.Describe())
 
 	if builder.onDestination {
-		return builder.buildOnDestination(commit, serviceName, dockerfile, tag)
+		return builder.buildOnDestination(commit, serviceName, dockerfile, tag, extraContext)
 	}
 
-	if err := builder.runBuild(repositoryPath, commit, serviceName, dockerfile, tag); err != nil {
+	if err := builder.runBuild(repositoryPath, commit, serviceName, dockerfile, tag, extraContext); err != nil {
 		return fmt.Errorf("building %s: %w", serviceName, err)
 	}
 
@@ -152,8 +159,19 @@ func (builder *Builder) Build(repositoryPath, commit, serviceName, dockerfile st
 
 // buildOnDestination builds from the release tree already placed there, which is
 // why it is the one path that does not stream a context.
-func (builder *Builder) buildOnDestination(commit, serviceName, dockerfile, tag string) error {
+func (builder *Builder) buildOnDestination(
+	commit, serviceName, dockerfile, tag string,
+	extraContext map[string][]byte,
+) error {
 	releaseDirectory := builder.releaseDirectory
+
+	// the context there is the placed tree, so a generated Dockerfile is written
+	// beside it rather than injected into a stream
+	for name, contents := range extraContext {
+		if err := builder.destination.WriteFile(path.Join(releaseDirectory, name), contents); err != nil {
+			return err
+		}
+	}
 	build := []string{
 		"docker", "build",
 		"--file", path.Join(releaseDirectory, dockerfile),
@@ -170,7 +188,10 @@ func (builder *Builder) buildOnDestination(commit, serviceName, dockerfile, tag 
 // runBuild feeds the git archive in as the build context rather than pointing at
 // the working directory, so the image and the release tree cannot disagree about
 // what they contain.
-func (builder *Builder) runBuild(repositoryPath, commit, serviceName, dockerfile, tag string) error {
+func (builder *Builder) runBuild(
+	repositoryPath, commit, serviceName, dockerfile, tag string,
+	extraContext map[string][]byte,
+) error {
 	command := []string{"docker"}
 
 	if builder.crossBuilding {
@@ -195,8 +216,11 @@ func (builder *Builder) runBuild(repositoryPath, commit, serviceName, dockerfile
 	archive, archiveFailed := startArchive(repositoryPath, commit)
 	defer archive.Close()
 
+	context, injectFailed := injectIntoContext(archive, extraContext)
+	defer context.Close()
+
 	build := exec.Command(command[0], command[1:]...)
-	build.Stdin = archive
+	build.Stdin = context
 	build.Stdout = os.Stdout
 	build.Stderr = os.Stderr
 
@@ -204,8 +228,31 @@ func (builder *Builder) runBuild(repositoryPath, commit, serviceName, dockerfile
 	if err := <-archiveFailed; err != nil {
 		return err
 	}
+	if err := <-injectFailed; err != nil {
+		return err
+	}
 
 	return buildErr
+}
+
+// injectIntoContext passes the archive straight through when there is nothing to
+// add, so the ordinary path pays nothing for a feature it does not use.
+func injectIntoContext(archive io.Reader, extra map[string][]byte) (io.ReadCloser, chan error) {
+	failed := make(chan error, 1)
+
+	if len(extra) == 0 {
+		failed <- nil
+		return io.NopCloser(archive), failed
+	}
+
+	reader, writer := io.Pipe()
+	go func() {
+		err := addToTar(archive, writer, extra)
+		writer.CloseWithError(err)
+		failed <- err
+	}()
+
+	return reader, failed
 }
 
 // shipImage moves a finished image to a destination that runs its own docker
@@ -284,4 +331,62 @@ func startArchive(repositoryPath, commit string) (*io.PipeReader, chan error) {
 	}()
 
 	return reader, failed
+}
+
+// addToTar copies a tar stream through and appends extra files at the end. A
+// generated Dockerfile has to be inside the build context, and the context here
+// is a stream, so it is added on the way past rather than written into anybody's
+// checkout.
+func addToTar(source io.Reader, destination io.Writer, extra map[string][]byte) error {
+	reader := tar.NewReader(source)
+	writer := tar.NewWriter(destination)
+
+	for {
+		header, err := reader.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return fmt.Errorf("reading the build context: %w", err)
+		}
+		if _, taken := extra[header.Name]; taken {
+			// ours wins, so a stale file of the same name in the commit cannot
+			// quietly shadow what deploy just generated
+			continue
+		}
+		if err := writer.WriteHeader(header); err != nil {
+			return err
+		}
+		if _, err := io.Copy(writer, reader); err != nil {
+			return fmt.Errorf("copying %s into the build context: %w", header.Name, err)
+		}
+	}
+
+	// tar stops at the end-of-archive marker, but git archive pads its output to a
+	// full block after that. Leaving those bytes unread blocks git forever on a
+	// pipe nobody is draining, which hangs the whole deploy rather than failing.
+	// tar stops at the end-of-archive marker, but git archive pads its output to a
+	// full block after that. Leaving those bytes unread blocks git forever on a
+	// pipe nobody is draining, which hangs the whole deploy rather than failing.
+	if _, err := io.Copy(io.Discard, source); err != nil {
+		return fmt.Errorf("draining the build context: %w", err)
+	}
+
+	for _, name := range slices.Sorted(maps.Keys(extra)) {
+		contents := extra[name]
+		header := &tar.Header{
+			Name:    name,
+			Mode:    0o644,
+			Size:    int64(len(contents)),
+			ModTime: time.Now(),
+		}
+		if err := writer.WriteHeader(header); err != nil {
+			return err
+		}
+		if _, err := writer.Write(contents); err != nil {
+			return err
+		}
+	}
+
+	return writer.Close()
 }
