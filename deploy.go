@@ -425,10 +425,17 @@ func retireSupersededRelease(
 // it is not running" would mean a changed postgres image, a new volume, or an
 // edited command silently never taking effect.
 func startShared(runner Runner, layout Layout, resolved ResolvedProject) error {
-	if _, err := runner.Run([]string{"docker", "network", "create", NetworkName(resolved.ID)}); err != nil {
-		// already existing is the normal case and the only one worth ignoring, so
-		// a real failure surfaces when the stack cannot reach the network
-		_ = err
+	network := NetworkName(resolved.ID)
+	if output, err := runner.Run([]string{"docker", "network", "create", network}); err != nil {
+		// a network that already exists is the normal case on every deploy after
+		// the first. anything else is a real failure and swallowing it would turn
+		// a permissions problem into a confusing one about a service that cannot
+		// reach its database
+		if !strings.Contains(string(output), "already exists") {
+			return fmt.Errorf(
+				"creating network %s on %s: %s", network, runner.Describe(), firstLine(output),
+			)
+		}
 	}
 	for _, volume := range VolumesFor(resolved) {
 		if _, err := runner.Run([]string{"docker", "volume", "create", volume}); err != nil {

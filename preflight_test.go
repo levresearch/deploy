@@ -54,7 +54,9 @@ func (runner *scriptedRunner) Run(command []string) ([]byte, error) {
 
 	for _, failing := range runner.failCommands {
 		if strings.Contains(joined, failing) {
-			return []byte("command not found"), errors.New("exit status 127")
+			// the canned output matters as much as the failure, since callers
+			// decide what to do by reading what docker said
+			return []byte(runner.responses[failing]), errors.New("exit status 1")
 		}
 	}
 	if len(command) == 3 && command[0] == "sh" && command[1] == "-c" {

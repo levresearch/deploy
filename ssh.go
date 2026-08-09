@@ -67,6 +67,9 @@ func NewSSHRunner(host string) (*SSHRunner, error) {
 	return runner, nil
 }
 
+// Close is best effort on purpose. The connection dies with ControlPersist
+// anyway, and failing a deploy that already worked over a socket that will not
+// shut down would be reporting a problem nobody has.
 func (runner *SSHRunner) Close() {
 	exec.Command("ssh", "-o", "ControlPath="+runner.controlPath, "-O", "exit", runner.host).Run()
 	os.RemoveAll(path.Dir(runner.controlPath))
