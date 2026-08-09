@@ -45,6 +45,8 @@ func run(args []string) int {
 			return runInspect(args[1:], "shell")
 		case "exec":
 			return runInspect(args[1:], "exec")
+		case "destroy":
+			return runDestroy(args[1:])
 		default:
 			fatal("unknown command %q, run deploy -h for the list", args[0])
 			return exitPreconditionNotMet
@@ -128,6 +130,26 @@ func runInspect(args []string, command string) int {
 		exitCode, err = RunExec(options, serviceName, inside)
 	}
 
+	if err != nil {
+		fatal("%v", err)
+	}
+
+	return exitCode
+}
+
+func runDestroy(args []string) int {
+	flags := newFlagSet("destroy")
+	options := DeployOptions{}
+	removeVolumes := false
+	stringFlag(flags, &options.Context, "context", "C", "", "scope deploy to this path instead of the cwd")
+	stringFlag(flags, &options.Destination, "destination", "D", "", "where the project gets deployed")
+	stringFlag(flags, &options.Environment, "environment", "e", defaultEnvironmentName, "environment to resolve")
+	flags.BoolVar(&removeVolumes, "volumes", false, "remove the data and the env files too")
+	if keepGoing, exitCode := parseCommandFlags(flags, args); !keepGoing {
+		return exitCode
+	}
+
+	exitCode, err := RunDestroy(options, removeVolumes, os.Stdin)
 	if err != nil {
 		fatal("%v", err)
 	}
@@ -279,6 +301,7 @@ usage:
   deploy logs [-f] <svc>  tail a service
   deploy shell <svc>      a shell inside the running container
   deploy exec <svc> -- .. run one command inside it
+  deploy destroy          tear this project down, keeping data unless --volumes
   deploy releases         releases on the destination, current one marked
   deploy env push <file>  upload an env file to the destination
   deploy rollback [<commit>]
