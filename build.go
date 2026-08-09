@@ -62,7 +62,7 @@ func NewBuilder(
 		projectID:         projectID,
 		localArchitecture: localArchitecture,
 		targetPlatform:    "linux/" + facts.Architecture,
-		crossBuilding:     facts.Architecture != "" && facts.Architecture != localArchitecture,
+		crossBuilding:     NeedsCrossBuild(localArchitecture, facts.Architecture),
 		// a local destination shares this docker daemon, so a built image is
 		// already where it needs to be
 		shipsImages:    remote,
@@ -86,6 +86,17 @@ func NewBuilder(
 	}
 
 	return builder, nil
+}
+
+// NeedsCrossBuild is the architecture decision on its own, separate from the
+// toolchain check that follows it. Separate because the decision is worth testing
+// exhaustively and the check needs QEMU installed, and a test whose result
+// depends on what the developer happens to have installed is not a test.
+//
+// An empty destination architecture means we could not read one, and treating
+// that as foreign would demand buildx for no reason.
+func NeedsCrossBuild(localArchitecture, destinationArchitecture string) bool {
+	return destinationArchitecture != "" && destinationArchitecture != localArchitecture
 }
 
 func LocalArchitecture(runner Runner) (string, error) {

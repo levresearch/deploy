@@ -25,37 +25,51 @@ func newBuilderForTest(t *testing.T, destinationArch string, remote, onDestinati
 	return builder
 }
 
-func TestBuilderPicksPlainBuildOrBuildxByArchitecture(t *testing.T) {
+// The decision is tested on its own, because building a real Builder for a
+// foreign architecture needs QEMU, and whether the developer happens to have it
+// installed must not decide whether this runs. CI has docker and no QEMU, which
+// is exactly the machine that caught this.
+func TestNeedsCrossBuild(t *testing.T) {
+	cases := []struct {
+		name        string
+		local       string
+		destination string
+		want        bool
+	}{
+		{"same architecture", "amd64", "amd64", false},
+		{"a pi from a laptop", "amd64", "arm64", true},
+		{"a laptop from a pi", "arm64", "amd64", true},
+		{"arm variants are still different", "arm64", "arm", true},
+		// an unreadable destination architecture must not demand buildx for
+		// nothing, since we do not know that it differs
+		{"destination architecture unknown", "amd64", "", false},
+	}
+
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			if got := NeedsCrossBuild(testCase.local, testCase.destination); got != testCase.want {
+				t.Errorf("NeedsCrossBuild(%q, %q) = %v, want %v",
+					testCase.local, testCase.destination, got, testCase.want)
+			}
+		})
+	}
+}
+
+func TestBuilderTargetsTheDestinationPlatform(t *testing.T) {
 	local, err := LocalArchitecture(LocalRunner{})
 	if err != nil {
 		t.Skipf("docker is not available: %v", err)
 	}
 
-	foreign := "arm64"
-	if local == "arm64" {
-		foreign = "amd64"
+	// the matching case needs no cross toolchain, so it is the one that can be
+	// built for real here
+	builder := newBuilderForTest(t, local, false, false)
+
+	if builder.crossBuilding {
+		t.Error("the same architecture builds plainly")
 	}
-
-	cases := []struct {
-		name              string
-		destinationArch   string
-		wantCrossBuilding bool
-	}{
-		{"same architecture builds plainly", local, false},
-		{"a foreign architecture needs buildx", foreign, true},
-	}
-
-	for _, testCase := range cases {
-		t.Run(testCase.name, func(t *testing.T) {
-			builder := newBuilderForTest(t, testCase.destinationArch, false, false)
-
-			if builder.crossBuilding != testCase.wantCrossBuilding {
-				t.Errorf("crossBuilding = %v, want %v", builder.crossBuilding, testCase.wantCrossBuilding)
-			}
-			if want := "linux/" + testCase.destinationArch; builder.targetPlatform != want {
-				t.Errorf("targetPlatform = %q, want %q", builder.targetPlatform, want)
-			}
-		})
+	if want := "linux/" + local; builder.targetPlatform != want {
+		t.Errorf("targetPlatform = %q, want %q", builder.targetPlatform, want)
 	}
 }
 

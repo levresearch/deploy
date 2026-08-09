@@ -462,10 +462,18 @@ func TestDeployRefusesADirtyTree(t *testing.T) {
 		t.Errorf("the refusal should name the flag that overrides it, got: %v", err)
 	}
 
-	// --allow-dirty gets past the check, and then fails later for its own reasons
-	// on a machine without docker, so only the dirtiness complaint matters here
+	// --allow-dirty has to get past the dirtiness check, and the cheapest way to
+	// see that is to let it fail on the next thing instead. an unreachable
+	// destination fails at ssh, so this never starts a container, which matters
+	// because this is a short mode test and short mode must not drive docker
 	options.AllowDirty = true
-	if _, err := RunDeploy(options); err != nil && strings.Contains(err.Error(), "--allow-dirty") {
+	options.Destination = unreachableHost + ":Projects"
+
+	_, err = RunDeploy(options)
+	if err == nil {
+		t.Fatal("an unreachable destination should still fail")
+	}
+	if strings.Contains(err.Error(), "--allow-dirty") {
 		t.Errorf("--allow-dirty should get past the dirty tree check, got: %v", err)
 	}
 }
