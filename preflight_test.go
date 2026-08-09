@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"io"
 	"strings"
 	"testing"
@@ -13,6 +14,7 @@ type scriptedRunner struct {
 	host           string
 	responses      map[string]string
 	absentBinaries []string
+	failCommands   []string
 	directory      []string
 	ran            []string
 }
@@ -47,6 +49,11 @@ func (runner *scriptedRunner) Run(command []string) ([]byte, error) {
 	joined := strings.Join(command, " ")
 	runner.ran = append(runner.ran, joined)
 
+	for _, failing := range runner.failCommands {
+		if strings.Contains(joined, failing) {
+			return []byte("command not found"), errors.New("exit status 127")
+		}
+	}
 	if len(command) == 3 && command[0] == "sh" && command[1] == "-c" {
 		return runner.runProbeScript(command[2]), nil
 	}
@@ -65,11 +72,11 @@ func (runner *scriptedRunner) Stream(command []string, _ io.Writer) error {
 	return err
 }
 
-func (runner *scriptedRunner) MkdirAll(string) error              { return nil }
-func (runner *scriptedRunner) WriteFile(string, []byte) error     { return nil }
-func (runner *scriptedRunner) ReadFile(string) ([]byte, error)    { return nil, nil }
-func (runner *scriptedRunner) RemoveAll(string) error             { return nil }
-func (runner *scriptedRunner) ExtractTar(string, io.Reader) error { return nil }
+func (runner *scriptedRunner) MkdirAll(string) error           { return nil }
+func (runner *scriptedRunner) WriteFile(string, []byte) error  { return nil }
+func (runner *scriptedRunner) ReadFile(string) ([]byte, error) { return nil, nil }
+func (runner *scriptedRunner) RemoveAll(string) error          { return nil }
+func (runner *scriptedRunner) Pipe([]string, io.Reader) error  { return nil }
 func (runner *scriptedRunner) ListDirectory(string) ([]string, error) {
 	return runner.directory, nil
 }

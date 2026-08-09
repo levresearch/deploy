@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"fmt"
-	"io"
 	"os/exec"
 	"strings"
 )
@@ -76,25 +75,10 @@ func PlaceRelease(runner Runner, repositoryPath, commit, releaseDirectory string
 		return fmt.Errorf("creating %s: %w", releaseDirectory, err)
 	}
 
-	reader, writer := io.Pipe()
-	archiveFailed := make(chan error, 1)
+	reader, archiveFailed := startArchive(repositoryPath, commit)
+	defer reader.Close()
 
-	go func() {
-		archive := exec.Command("git", "-C", repositoryPath, "archive", "--format=tar", commit)
-		archive.Stdout = writer
-
-		var failure bytes.Buffer
-		archive.Stderr = &failure
-
-		err := archive.Run()
-		if err != nil {
-			err = fmt.Errorf("git archive %s: %s", ShortCommit(commit), strings.TrimSpace(failure.String()))
-		}
-		writer.CloseWithError(err)
-		archiveFailed <- err
-	}()
-
-	extractErr := runner.ExtractTar(releaseDirectory, reader)
+	extractErr := runner.Pipe([]string{"tar", "-x", "-C", releaseDirectory}, reader)
 	if archiveErr := <-archiveFailed; archiveErr != nil {
 		return archiveErr
 	}

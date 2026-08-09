@@ -168,15 +168,17 @@ func (runner *SSHRunner) RemoveAll(target string) error {
 	return nil
 }
 
-func (runner *SSHRunner) ExtractTar(directory string, archive io.Reader) error {
-	process := runner.ssh("tar -x -C " + ShellQuote(directory))
-	process.Stdin = archive
+func (runner *SSHRunner) Pipe(command []string, input io.Reader) error {
+	process := runner.ssh(ShellCommand(command))
+	process.Stdin = input
 
 	var failure bytes.Buffer
 	process.Stderr = &failure
 
 	if err := process.Run(); err != nil {
-		return fmt.Errorf("extracting into %s on %s: %s", directory, runner.host, strings.TrimSpace(failure.String()))
+		return fmt.Errorf(
+			"%s on %s: %s", strings.Join(command, " "), runner.host, strings.TrimSpace(failure.String()),
+		)
 	}
 
 	return nil

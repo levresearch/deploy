@@ -16,6 +16,7 @@ type DeployOptions struct {
 	Environment string
 	AllowDirty  bool
 	ForceUnlock bool
+	BuildOnDest bool
 }
 
 // Layout is where everything for one project lives on the destination. Volumes
@@ -112,9 +113,16 @@ func RunDeploy(options DeployOptions) (int, error) {
 		return exitPreconditionNotMet, err
 	}
 
+	// the cross build toolchain is a precondition like any other, so a missing
+	// buildx fails here rather than after a release has been placed
+	builder, err := NewBuilder(runner, facts, resolved.ID, repositoryPath, destination.IsRemote(), options.BuildOnDest)
+	if err != nil {
+		return exitPreconditionNotMet, err
+	}
+
 	fmt.Printf(
 		"deploying %s %s to %s (%s)\n",
-		resolved.Name, ShortCommit(commit), destination, facts.Architecture,
+		resolved.Name, ShortCommit(commit), destination, builder.Describe(),
 	)
 
 	lock, err := AcquireLock(runner, layout, commit, options.ForceUnlock)
@@ -134,7 +142,8 @@ func RunDeploy(options DeployOptions) (int, error) {
 	}
 	fmt.Printf("  placed release in %s\n", releaseDirectory)
 
-	if err := buildServices(runner, resolved, repositoryPath, commit); err != nil {
+	builder.SetReleaseDirectory(releaseDirectory)
+	if err := buildServices(builder, resolved, repositoryPath, commit); err != nil {
 		return exitDeployFailed, err
 	}
 
@@ -324,11 +333,9 @@ func loadResolvedConfig(repositoryPath, environmentName string) (ResolvedProject
 	return resolved, nil
 }
 
-// buildServices builds from the git archive rather than the working directory, so
-// the image and the release tree cannot disagree about what they contain. Release
-// tasks are built too, since a migration usually ships in the same image as the
-// app it migrates.
-func buildServices(runner Runner, resolved ResolvedProject, repositoryPath, commit string) error {
+// buildServices builds everything with a build key. Release tasks are included,
+// since a migration usually ships in the same image as the app it migrates.
+func buildServices(builder *Builder, resolved ResolvedProject, repositoryPath, commit string) error {
 	buildable := map[string]Service{}
 	maps.Copy(buildable, resolved.Services)
 	maps.Copy(buildable, resolved.Release)
@@ -343,18 +350,8 @@ func buildServices(runner Runner, resolved ResolvedProject, repositoryPath, comm
 		if err != nil {
 			return err
 		}
-
-		tag := ImageTag(resolved.ID, name, commit)
-		fmt.Printf("  building %s\n", tag)
-
-		build := []string{
-			"docker", "build",
-			"--file", path.Join(repositoryPath, dockerfile),
-			"--tag", tag,
-			repositoryPath,
-		}
-		if err := runner.Stream(build, os.Stdout); err != nil {
-			return fmt.Errorf("building %s: %w", name, err)
+		if err := builder.Build(repositoryPath, commit, name, dockerfile); err != nil {
+			return err
 		}
 	}
 

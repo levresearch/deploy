@@ -65,7 +65,9 @@ type Runner interface {
 	ReadFile(path string) ([]byte, error)
 	ListDirectory(path string) ([]string, error)
 	RemoveAll(path string) error
-	ExtractTar(directory string, archive io.Reader) error
+	// Pipe feeds a local stream into a command running wherever the runner runs,
+	// which is how a release tar and an image tarball both get across.
+	Pipe(command []string, input io.Reader) error
 }
 
 // OpenRunner picks where the work happens. The returned close is what tears down
@@ -134,15 +136,15 @@ func (LocalRunner) RemoveAll(path string) error {
 	return os.RemoveAll(path)
 }
 
-func (LocalRunner) ExtractTar(directory string, archive io.Reader) error {
-	extract := exec.Command("tar", "-x", "-C", directory)
-	extract.Stdin = archive
+func (LocalRunner) Pipe(command []string, input io.Reader) error {
+	process := exec.Command(command[0], command[1:]...)
+	process.Stdin = input
 
 	var failure bytes.Buffer
-	extract.Stderr = &failure
+	process.Stderr = &failure
 
-	if err := extract.Run(); err != nil {
-		return fmt.Errorf("extracting into %s: %s", directory, strings.TrimSpace(failure.String()))
+	if err := process.Run(); err != nil {
+		return fmt.Errorf("%s: %s", strings.Join(command, " "), strings.TrimSpace(failure.String()))
 	}
 
 	return nil

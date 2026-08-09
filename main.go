@@ -49,6 +49,7 @@ func runDeploy(args []string) int {
 	stringFlag(flags, &options.Environment, "environment", "e", defaultEnvironmentName, "environment to resolve")
 	flags.BoolVar(&options.AllowDirty, "allow-dirty", false, "deploy with uncommitted changes present")
 	flags.BoolVar(&options.ForceUnlock, "force-unlock", false, "break a stale deploy.lock")
+	flags.BoolVar(&options.BuildOnDest, "build-on-destination", false, "let the destination build instead of building here")
 	if keepGoing, exitCode := parseCommandFlags(flags, args); !keepGoing {
 		return exitCode
 	}
@@ -184,6 +185,8 @@ flags:
   -D, --destination <path>  where the project gets deployed
       --allow-dirty         deploy with uncommitted changes present
       --force-unlock        break a stale deploy.lock
+      --build-on-destination
+                            build on the destination instead of here
   -e, --environment <name>  environment to resolve, default "`+defaultEnvironmentName+`"
   -h, --help                show this help
 `)
