@@ -422,3 +422,113 @@ func TestNetworkCreationDistinguishesAlreadyExistingFromRealFailure(t *testing.T
 		})
 	}
 }
+
+// deploy -D /srv status used to silently deploy, because the leftover argument
+// was parsed as a flag value's neighbour and then ignored. Quietly doing the
+// wrong thing is the failure mode this tool is supposed to be the opposite of.
+func TestAStrayArgumentIsRefusedRatherThanIgnored(t *testing.T) {
+	repository := newRepository(t)
+	writeFile(t, repository, configFileName, `{
+      "version": 1, "id": "ee000006", "name": "stray",
+      "services": {"app": {"image": "busybox:latest"}}
+    }`)
+	commitFile(t, repository, "one.txt", "x")
+
+	cases := []struct {
+		name string
+		args []string
+	}{
+		{"a command after flags on the bare deploy", []string{"-C", repository, "status"}},
+		{"a command after flags on a subcommand", []string{"status", "-C", repository, "list"}},
+		{"a plain typo", []string{"-C", repository, "wat"}},
+		{"an extra argument to releases", []string{"releases", "-C", repository, "extra"}},
+	}
+
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			if got := runQuietly(t, testCase.args); got != exitPreconditionNotMet {
+				t.Errorf("deploy %s exited %d, want %d",
+					strings.Join(testCase.args, " "), got, exitPreconditionNotMet)
+			}
+		})
+	}
+
+	// and the arguments that are meant to be there still work. these fail for
+	// their own reasons, and the point is that the reason is never the argument
+	for _, args := range [][]string{
+		{"rollback", "abc1234", "-C", repository, "-D", t.TempDir()},
+		{"exec", "web", "-C", repository, "-D", t.TempDir(), "--", "echo", "hi"},
+		{"logs", "web", "-C", repository, "-D", t.TempDir()},
+	} {
+		t.Run(args[0]+" keeps its own argument", func(t *testing.T) {
+			complaint := captureStderr(t, func() { run(args) })
+
+			for _, wrong := range []string{"does not take", "is a command"} {
+				if strings.Contains(complaint, wrong) {
+					t.Errorf("deploy %s was refused for its own argument: %s",
+						strings.Join(args, " "), complaint)
+				}
+			}
+		})
+	}
+}
+
+func captureStderr(t *testing.T, work func()) string {
+	t.Helper()
+
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("creating pipe: %v", err)
+	}
+
+	devNull, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatalf("opening %s: %v", os.DevNull, err)
+	}
+	defer devNull.Close()
+
+	originalOut, originalErr := os.Stdout, os.Stderr
+	os.Stdout, os.Stderr = devNull, writer
+	defer func() { os.Stdout, os.Stderr = originalOut, originalErr }()
+
+	collected := make(chan string, 1)
+	go func() {
+		var seen strings.Builder
+		buffer := make([]byte, 4096)
+		for {
+			read, err := reader.Read(buffer)
+			if read > 0 {
+				seen.Write(buffer[:read])
+			}
+			if err != nil {
+				break
+			}
+		}
+		collected <- seen.String()
+	}()
+
+	work()
+	writer.Close()
+
+	return <-collected
+}
+
+// Every command in the dispatch table has to be reachable, or the error that
+// suggests one would name something that does not run.
+func TestEverySubcommandDispatches(t *testing.T) {
+	elsewhere := t.TempDir()
+
+	for name := range subcommands {
+		t.Run(name, func(t *testing.T) {
+			// outside a repository every one of these fails the same way, which
+			// is enough to prove it dispatched rather than fell through to deploy
+			if got := runQuietly(t, []string{name, "-C", elsewhere}); got == exitOK {
+				t.Errorf("%s outside a repository should not have succeeded", name)
+			}
+		})
+	}
+
+	if len(subcommands) < 10 {
+		t.Errorf("the dispatch table has %d commands, which is fewer than deploy has", len(subcommands))
+	}
+}

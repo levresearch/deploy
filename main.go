@@ -20,37 +20,42 @@ const (
 	exitLiveButNeedsAHuman = 3
 )
 
+// subcommands is the dispatch table and the list an error message checks against,
+// so the two can never disagree about what exists.
+//
+// NOTE: filled in by init rather than declared, because parseCommandFlags reads
+// this map and several of the functions in it call parseCommandFlags, which go
+// sees as an initialisation cycle.
+var subcommands map[string]func([]string) int
+
+func init() {
+	subcommands = map[string]func([]string) int{
+		"check":    runCheck,
+		"releases": runReleases,
+		"env":      runEnv,
+		"rollback": runRollback,
+		"destroy":  runDestroy,
+		"status":   func(args []string) int { return runInspect(args, "status") },
+		"list":     func(args []string) int { return runInspect(args, "list") },
+		"logs":     func(args []string) int { return runInspect(args, "logs") },
+		"shell":    func(args []string) int { return runInspect(args, "shell") },
+		"exec":     func(args []string) int { return runInspect(args, "exec") },
+	}
+}
+
 func main() {
 	os.Exit(run(os.Args[1:]))
 }
 
 func run(args []string) int {
 	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
-		switch args[0] {
-		case "check":
-			return runCheck(args[1:])
-		case "releases":
-			return runReleases(args[1:])
-		case "env":
-			return runEnv(args[1:])
-		case "rollback":
-			return runRollback(args[1:])
-		case "status":
-			return runInspect(args[1:], "status")
-		case "list":
-			return runInspect(args[1:], "list")
-		case "logs":
-			return runInspect(args[1:], "logs")
-		case "shell":
-			return runInspect(args[1:], "shell")
-		case "exec":
-			return runInspect(args[1:], "exec")
-		case "destroy":
-			return runDestroy(args[1:])
-		default:
+		command, known := subcommands[args[0]]
+		if !known {
 			fatal("unknown command %q, run deploy -h for the list", args[0])
 			return exitPreconditionNotMet
 		}
+
+		return command(args[1:])
 	}
 
 	return runDeploy(args)
@@ -277,17 +282,33 @@ func stringFlag(flags *flag.FlagSet, target *string, long, short, fallback, usag
 
 // parseCommandFlags reports whether the command should carry on. Asking for help
 // is not a failure, so it stops with a success code rather than an error one.
+//
+// Anything left over after the flags is refused. Every command here takes its
+// positional argument before parsing, so a leftover is something the user typed
+// and deploy would otherwise ignore. `deploy -D /srv status` silently deploying
+// instead of showing status is exactly the kind of quiet wrong that this whole
+// tool is supposed to be the opposite of.
 func parseCommandFlags(flags *flag.FlagSet, args []string) (bool, int) {
 	err := flags.Parse(args)
 
 	switch {
-	case err == nil:
-		return true, exitOK
 	case errors.Is(err, flag.ErrHelp):
 		return false, exitOK
-	default:
+	case err != nil:
 		return false, exitPreconditionNotMet
 	}
+
+	if leftover := flags.Args(); len(leftover) > 0 {
+		if _, isCommand := subcommands[leftover[0]]; isCommand {
+			fatal("%s is a command, so it goes first, as in: deploy %s <flags>", leftover[0], leftover[0])
+		} else {
+			fatal("%s does not take %q", flags.Name(), strings.Join(leftover, " "))
+		}
+
+		return false, exitPreconditionNotMet
+	}
+
+	return true, exitOK
 }
 
 func printUsage() {

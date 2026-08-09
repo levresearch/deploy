@@ -2,7 +2,9 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
+	"io/fs"
 	"maps"
 	"os"
 	"path"
@@ -66,8 +68,19 @@ func RunDeploy(options DeployOptions) (int, error) {
 		return exitPreconditionNotMet, err
 	}
 
+	// a project with no config gets one here rather than from a separate command,
+	// so deploy is the only thing anyone has to run
+	created, err := EnsureProjectConfig(repositoryPath, options.Destination)
+	if err != nil {
+		return exitPreconditionNotMet, err
+	}
+
 	resolved, err := loadResolvedConfig(repositoryPath, options.Environment)
 	if err != nil {
+		if created {
+			describeFreshConfig(freshProjectID(repositoryPath))
+		}
+
 		return exitPreconditionNotMet, err
 	}
 
@@ -330,6 +343,17 @@ func RunEnvPush(options DeployOptions, localPath string) (int, error) {
 	return exitOK, nil
 }
 
+// freshProjectID reads back what was just written, so the message names the real
+// id rather than one generated twice.
+func freshProjectID(repositoryPath string) string {
+	project, err := LoadProject(path.Join(repositoryPath, configFileName))
+	if err != nil {
+		return "(unreadable)"
+	}
+
+	return project.ID
+}
+
 // resolveGitStorage is optional, so an unset one is not an error. It only ever
 // unlocks the faster path.
 func resolveGitStorage(fromFlag, fromConfig string) (Destination, error) {
@@ -345,7 +369,14 @@ func resolveGitStorage(fromFlag, fromConfig string) (Destination, error) {
 }
 
 func loadResolvedConfig(repositoryPath, environmentName string) (ResolvedProject, error) {
-	project, err := LoadProject(path.Join(repositoryPath, configFileName))
+	configPath := path.Join(repositoryPath, configFileName)
+
+	project, err := LoadProject(configPath)
+	if errors.Is(err, fs.ErrNotExist) {
+		return ResolvedProject{}, fmt.Errorf(
+			"no %s in %s. run deploy there and it will write one", configFileName, repositoryPath,
+		)
+	}
 	if err != nil {
 		return ResolvedProject{}, err
 	}
