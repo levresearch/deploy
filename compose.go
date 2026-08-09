@@ -82,7 +82,33 @@ func SplitServices(services map[string]Service) (stateful, stateless map[string]
 func RenderShared(resolved ResolvedProject, layout Layout) ([]byte, error) {
 	stateful, _ := SplitServices(resolved.Services)
 
-	return renderProject(resolved, layout, SharedProjectName(resolved.ID), stateful, "")
+	rendered, err := renderProject(resolved, layout, SharedProjectName(resolved.ID), stateful, "")
+	if err != nil {
+		return nil, err
+	}
+
+	tunnels, err := renderTunnels(resolved)
+	if err != nil {
+		return nil, err
+	}
+	if len(tunnels) == 0 {
+		return rendered, nil
+	}
+
+	// cloudflared belongs beside the stateful services rather than in a release
+	// stack, because one inside a per-commit project restarts on every deploy
+	var project ComposeProject
+	if err := json.Unmarshal(rendered, &project); err != nil {
+		return nil, err
+	}
+	maps.Copy(project.Services, tunnels)
+
+	document, err := json.MarshalIndent(project, "", "  ")
+	if err != nil {
+		return nil, err
+	}
+
+	return append(document, '\n'), nil
 }
 
 // RenderRelease is the per-commit stack. It declares no volumes of its own, and

@@ -131,6 +131,13 @@ func openProject(options DeployOptions) (ResolvedProject, Layout, Runner, func()
 		return ResolvedProject{}, Layout{}, nil, nil, Destination{}, err
 	}
 
+	destination, err = AbsoluteDestination(runner, destination)
+	if err != nil {
+		closeRunner()
+
+		return ResolvedProject{}, Layout{}, nil, nil, Destination{}, err
+	}
+
 	return resolved, NewLayout(destination.Path, resolved.ID), runner, closeRunner, destination, nil
 }
 
@@ -176,8 +183,10 @@ func RunStatus(options DeployOptions) (int, error) {
 			host := resolved.Services[name].Host
 			fmt.Printf("    %-12s %s -> %s:%d\n", name, host.Domain, name, host.Port)
 		}
-		// saying so beats leaving someone to infer it from a tunnel that never moves
-		fmt.Printf("    (the tunnel cutover is not implemented yet, so these are wired by hand)\n")
+		fmt.Printf("\n  tunnels\n")
+		for _, name := range hosted {
+			fmt.Printf("    %-12s %s\n", TunnelServiceName(name), "in the shared stack")
+		}
 	}
 
 	return exitOK, nil

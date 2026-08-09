@@ -270,7 +270,7 @@ func TestCrossArchitectureBuildProducesAForeignImage(t *testing.T) {
 	tag := ImageTag("dd00000a", "app", commit)
 	t.Cleanup(func() {
 		exec.Command("docker", "image", "rm", "-f", tag).Run()
-		os.RemoveAll(filepath.Join(repository, ".deploy"))
+		os.RemoveAll(buildCacheDirectory("dd00000a"))
 	})
 
 	if err := builder.Build(repository, commit, "app", "Dockerfile", nil); err != nil {
@@ -285,10 +285,13 @@ func TestCrossArchitectureBuildProducesAForeignImage(t *testing.T) {
 		t.Errorf("built for %q, want %q", got, foreign)
 	}
 
-	// the layer cache is what makes a second build cheap, and it belongs in the
-	// gitignored .deploy directory rather than anywhere the repo would see
-	cache := filepath.Join(repository, ".deploy", "cache", "app")
+	// the layer cache is what makes a second build cheap, and it lives outside the
+	// repository so it cannot make the working tree dirty
+	cache := filepath.Join(buildCacheDirectory("dd00000a"), "app")
 	if _, err := os.Stat(cache); err != nil {
 		t.Errorf("expected a layer cache at %s: %v", cache, err)
+	}
+	if strings.HasPrefix(cache, repository) {
+		t.Errorf("the cache must not be inside the repository, got %s", cache)
 	}
 }

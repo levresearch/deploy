@@ -251,6 +251,25 @@ func HostedServices(services map[string]Service) []string {
 	return hosted
 }
 
+// EnvFileArguments hands compose the env files, which is how the tunnel token
+// gets interpolated in without deploy ever reading the value.
+func EnvFileArguments(resolved ResolvedProject, layout Layout) []string {
+	wanted := map[string]bool{}
+	for _, service := range resolved.Services {
+		collectProjectEnvFiles(service, wanted)
+	}
+	for _, task := range resolved.Release {
+		collectProjectEnvFiles(task, wanted)
+	}
+
+	var arguments []string
+	for _, name := range slices.Sorted(maps.Keys(wanted)) {
+		arguments = append(arguments, "--env-file", path.Join(layout.EnvDirectory(), name))
+	}
+
+	return arguments
+}
+
 // PushEnvFile puts one env file where the rendered compose expects it, with
 // permissions that match what it holds.
 func PushEnvFile(runner Runner, layout Layout, name string, contents []byte) error {

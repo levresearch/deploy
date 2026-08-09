@@ -419,60 +419,26 @@ func TestADeployStopsTheReleaseItReplaces(t *testing.T) {
 	}
 }
 
-// An exposed project keeps both stacks up, because stopping the old one before
-// the tunnel points at the new one is the outage the cutover exists to prevent.
-func TestAnExposedProjectKeepsTheOldStackUntilTheTunnelCanBeMoved(t *testing.T) {
-	dockerAvailable(t)
+// A hosted project takes the full cutover, which needs a real tunnel to prove end
+// to end. That is the manual box in task 9. What can be asserted here is that the
+// path is chosen at all, and the ordering within it is covered by
+// TestCutoverOrdersItsStepsCorrectly against fake runners.
+func TestAHostedProjectTakesTheCutoverPath(t *testing.T) {
+	resolved := loadAndResolve(t, hostedConfig, defaultEnvironmentName)
 
-	// a host block makes cloudflared a genuine requirement, which is the rule
-	// working rather than a problem, so skip where it is not installed
-	if err := exec.Command("cloudflared", "--version").Run(); err != nil {
-		t.Skip("cloudflared is not installed, and a hosted project requires it")
+	if hosted := HostedServices(resolved.Services); len(hosted) != 2 {
+		t.Fatalf("expected two hosted services, got %v", hosted)
 	}
 
-	repository := newRepository(t)
-	writeFile(t, repository, configFileName, `{
-      "version": 1,
-      "id": "dd00000e",
-      "name": "exposed",
-      "retention": 3,
-      "services": {
-        "app": {
-          "image": "busybox:latest",
-          "stateful": false,
-          "command": ["sh", "-c", "sleep 300"],
-          "healthcheck": {"command": ["CMD", "true"], "interval": "1s", "retries": 5},
-          "host": {"domain": "example.com", "port": 80, "tunnelTokenFrom": "TOKEN"}
-        }
-      }
-    }`)
+	runner := newRecordingRunner()
+	hurryVerification(t)
 
-	destination := t.TempDir()
-	t.Cleanup(func() { exec.Command("docker", "network", "rm", NetworkName("dd00000e")).Run() })
+	// it probes and stops rather than going straight to removing, which is what
+	// an unhosted project does
+	_ = Cutover(runner, resolved, NewLayout("/srv/projects", "a3f19c02"), "aaaaaaa", "bbbbbbb")
 
-	var commits []string
-	for round := range 2 {
-		commit := commitFile(t, repository, "round.txt", string(rune('a'+round)))
-		commits = append(commits, ShortCommit(commit))
-		t.Cleanup(func() {
-			exec.Command("docker", "compose", "--project-name", ProjectName("dd00000e", commit), "down").Run()
-		})
-
-		if _, err := RunDeploy(DeployOptions{
-			Context: repository, Destination: destination, Environment: defaultEnvironmentName,
-		}); err != nil {
-			t.Fatalf("deploy %d: %v", round+1, err)
-		}
-	}
-
-	running, err := exec.Command("docker", "ps", "--format", "{{.Names}}").Output()
-	if err != nil {
-		t.Fatalf("listing containers: %v", err)
-	}
-	for _, commit := range commits {
-		if !strings.Contains(string(running), ProjectName("dd00000e", commit)) {
-			t.Errorf("release %s should still be running, since nothing may be stopped before the tunnel moves", commit)
-		}
+	if len(runner.steps) == 0 || runner.steps[0] != "probe network" {
+		t.Errorf("a hosted project checks reachability first, got %v", runner.steps)
 	}
 }
 

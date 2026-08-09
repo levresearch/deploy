@@ -73,6 +73,30 @@ type Runner interface {
 	Interactive(command []string) error
 }
 
+// AbsoluteDestination expands the destination to a real path on the machine that
+// will hold it. Everything deploy writes into a compose file is read back
+// relative to that file unless it is absolute, so `git:Projects` resolving
+// against a release directory instead of the home directory is the difference
+// between an env file being found and a deploy that dies at the last step.
+func AbsoluteDestination(runner Runner, destination Destination) (Destination, error) {
+	expand := fmt.Sprintf("mkdir -p %s && cd %s && pwd", ShellQuote(destination.Path), ShellQuote(destination.Path))
+
+	output, err := runner.Run([]string{"sh", "-c", expand})
+	if err != nil {
+		return destination, fmt.Errorf(
+			"cannot use %s on %s: %s", destination.Path, runner.Describe(), firstLine(output),
+		)
+	}
+
+	resolved := strings.TrimSpace(string(output))
+	if resolved == "" {
+		return destination, fmt.Errorf("%s on %s resolved to nothing", destination.Path, runner.Describe())
+	}
+	destination.Path = resolved
+
+	return destination, nil
+}
+
 // OpenRunner picks where the work happens. The returned close is what tears down
 // the ssh connection, and is a no-op locally.
 func OpenRunner(destination Destination) (Runner, func(), error) {

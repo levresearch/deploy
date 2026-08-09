@@ -67,7 +67,7 @@ func NewBuilder(
 		// already where it needs to be
 		shipsImages:    remote,
 		onDestination:  buildOnDestination,
-		cacheDirectory: path.Join(repositoryPath, ".deploy", "cache"),
+		cacheDirectory: buildCacheDirectory(projectID),
 	}
 
 	// with the escape hatch the destination does its own building, so none of the
@@ -86,6 +86,19 @@ func NewBuilder(
 	}
 
 	return builder, nil
+}
+
+// buildCacheDirectory keeps the layer cache out of the repository. A cache inside
+// the checkout makes the working tree dirty, which the next deploy refuses over a
+// directory deploy created itself, and no amount of gitignoring makes writing
+// into somebody's repo the right default.
+func buildCacheDirectory(projectID string) string {
+	base, err := os.UserCacheDir()
+	if err != nil {
+		return path.Join(os.TempDir(), "deploy-cache", projectID)
+	}
+
+	return path.Join(base, "deploy", projectID)
 }
 
 // NeedsCrossBuild is the architecture decision on its own, separate from the

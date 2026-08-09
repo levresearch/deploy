@@ -102,6 +102,10 @@ func RunRollback(options DeployOptions, requested string) (int, error) {
 	}
 	defer closeRunner()
 
+	destination, err = AbsoluteDestination(runner, destination)
+	if err != nil {
+		return exitPreconditionNotMet, err
+	}
 	layout := NewLayout(destination.Path, resolved.ID)
 
 	lock, err := AcquireLock(runner, layout, requested, options.ForceUnlock)

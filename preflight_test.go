@@ -4,6 +4,9 @@ import (
 	"errors"
 	"io"
 	"io/fs"
+	"os"
+	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -334,5 +337,36 @@ func TestShellQuotingNeutralisesShellSyntax(t *testing.T) {
 				t.Errorf("ShellQuote(%q) = %s, which escapes out of its quoting", argument, quoted)
 			}
 		}
+	}
+}
+
+// The two runner implementations have to agree about what is in a directory.
+// They did not: os.ReadDir lists dotfiles and `ls -1` does not, so a pushed
+// .env.production was invisible over ssh and every hosted deploy failed its own
+// preflight.
+func TestBothRunnersListDotfiles(t *testing.T) {
+	directory := t.TempDir()
+	for _, name := range []string{".env.production", "visible.txt", ".hidden"} {
+		if err := os.WriteFile(filepath.Join(directory, name), []byte("x"), 0o600); err != nil {
+			t.Fatalf("writing %s: %v", name, err)
+		}
+	}
+
+	listed, err := LocalRunner{}.ListDirectory(directory)
+	if err != nil {
+		t.Fatalf("ListDirectory: %v", err)
+	}
+	for _, want := range []string{".env.production", ".hidden", "visible.txt"} {
+		if !slices.Contains(listed, want) {
+			t.Errorf("the local runner did not list %q, got %v", want, listed)
+		}
+	}
+
+	// the ssh runner shells out, so what matters is the flag it uses
+	runner := &SSHRunner{host: "pi", controlPath: "/tmp/none"}
+	command := runner.ssh("ls -1A " + ShellQuote(directory)).Args
+	joined := strings.Join(command, " ")
+	if !strings.Contains(joined, "ls -1A") {
+		t.Errorf("the ssh listing must include dotfiles, got %q", joined)
 	}
 }

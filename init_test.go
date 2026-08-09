@@ -105,7 +105,7 @@ func TestGitignoreIsNotDuplicatedOrClobbered(t *testing.T) {
 	commitFile(t, repository, "one.txt", "x")
 
 	for range 3 {
-		if err := ignoreDeployDirectory(repository); err != nil {
+		if _, err := ignoreDeployDirectory(repository); err != nil {
 			t.Fatalf("ignoreDeployDirectory: %v", err)
 		}
 	}
@@ -133,7 +133,7 @@ func TestGitignoreWithoutATrailingNewlineStillGetsALineOfItsOwn(t *testing.T) {
 		t.Fatalf("writing .gitignore: %v", err)
 	}
 
-	if err := ignoreDeployDirectory(repository); err != nil {
+	if _, err := ignoreDeployDirectory(repository); err != nil {
 		t.Fatalf("ignoreDeployDirectory: %v", err)
 	}
 
@@ -242,5 +242,21 @@ func TestASecondRunAfterFillingInServicesDeploys(t *testing.T) {
 	// not become a second project
 	if state.Name != project.Name {
 		t.Errorf("state name = %q, want %q", state.Name, project.Name)
+	}
+}
+
+// The layer cache must not land in the repository, because a cache inside the
+// checkout makes the tree dirty and the next deploy refuses over a directory
+// deploy created itself.
+func TestTheBuildCacheStaysOutOfTheRepository(t *testing.T) {
+	repository := newRepository(t)
+
+	cache := buildCacheDirectory("a3f19c02")
+
+	if strings.HasPrefix(cache, repository) {
+		t.Errorf("the build cache is inside the repository at %s", cache)
+	}
+	if !strings.Contains(cache, "a3f19c02") {
+		t.Errorf("the cache should be per project, got %s", cache)
 	}
 }

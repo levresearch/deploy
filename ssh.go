@@ -144,8 +144,12 @@ func (runner *SSHRunner) ReadFile(remotePath string) ([]byte, error) {
 	return contents.Bytes(), nil
 }
 
+// ListDirectory includes dotfiles, because env files are dotfiles and a plain
+// ls -1 hides exactly the thing this is most often asked to find. The local
+// runner uses os.ReadDir, which lists them, so without -A the two
+// implementations quietly disagree.
 func (runner *SSHRunner) ListDirectory(directory string) ([]string, error) {
-	process := runner.ssh("ls -1 " + ShellQuote(directory))
+	process := runner.ssh("ls -1A " + ShellQuote(directory))
 
 	var listing, failure bytes.Buffer
 	process.Stdout = &listing

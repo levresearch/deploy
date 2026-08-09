@@ -126,6 +126,10 @@ func RunDeploy(options DeployOptions) (int, error) {
 	}
 	defer closeRunner()
 
+	destination, err = AbsoluteDestination(runner, destination)
+	if err != nil {
+		return exitPreconditionNotMet, err
+	}
 	layout := NewLayout(destination.Path, resolved.ID)
 
 	facts, err := CheckDestination(runner, resolved, layout)
@@ -195,7 +199,9 @@ func RunDeploy(options DeployOptions) (int, error) {
 	}
 	fmt.Printf("  %s is up\n", ProjectName(resolved.ID, commit))
 
-	retireSupersededRelease(runner, layout, resolved, state.Current, commit)
+	if err := Cutover(runner, resolved, layout, state.Current, commit); err != nil {
+		return exitDeployFailed, err
+	}
 
 	// everything past here has already put the new release in service, so a
 	// failure is reported and never rolled back
@@ -252,6 +258,10 @@ func RunReleases(options DeployOptions) (int, error) {
 	}
 	defer closeRunner()
 
+	destination, err = AbsoluteDestination(runner, destination)
+	if err != nil {
+		return exitPreconditionNotMet, err
+	}
 	layout := NewLayout(destination.Path, resolved.ID)
 
 	state, err := ReadState(runner, layout)
@@ -332,6 +342,10 @@ func RunEnvPush(options DeployOptions, localPath string) (int, error) {
 	}
 	defer closeRunner()
 
+	destination, err = AbsoluteDestination(runner, destination)
+	if err != nil {
+		return exitPreconditionNotMet, err
+	}
 	layout := NewLayout(destination.Path, resolved.ID)
 	name := path.Base(localPath)
 
@@ -419,36 +433,13 @@ func buildServices(builder *Builder, resolved ResolvedProject, repositoryPath, c
 	return nil
 }
 
-// retireSupersededRelease stops the release the new one just replaced, which only
-// happens after the new stack is up and --wait has already confirmed every
-// healthcheck passed. Leaving it running would pile up a stack per deploy, which
-// on a small box is real memory.
-//
-// NOTE: a project with a host block keeps both stacks up, because stopping the
-// old one before the tunnel has been pointed at the new one is precisely the
-// outage the cutover exists to avoid. That swap is not implemented yet, so this
-// deliberately does less rather than something unsafe.
-func retireSupersededRelease(
-	runner Runner,
-	layout Layout,
-	resolved ResolvedProject,
-	superseded, commit string,
-) {
-	if superseded == "" || superseded == ShortCommit(commit) {
-		return
+func tunnelNames(hosted []string) []string {
+	names := make([]string, 0, len(hosted))
+	for _, name := range hosted {
+		names = append(names, TunnelServiceName(name))
 	}
 
-	if hosted := HostedServices(resolved.Services); len(hosted) > 0 {
-		fmt.Printf(
-			"  leaving %s running, since %s is exposed and the tunnel cutover is not implemented yet\n",
-			ProjectName(resolved.ID, superseded), strings.Join(hosted, ", "),
-		)
-
-		return
-	}
-
-	stopRelease(runner, resolved.ID, superseded, path.Join(layout.Release(superseded), composeFileName))
-	fmt.Printf("  stopped %s, which this release replaces\n", ProjectName(resolved.ID, superseded))
+	return names
 }
 
 // startShared brings up the stack that outlives every release. It is rendered
@@ -475,7 +466,12 @@ func startShared(runner Runner, layout Layout, resolved ResolvedProject) error {
 	}
 
 	stateful, _ := SplitServices(resolved.Services)
-	if len(stateful) == 0 {
+	hosted := HostedServices(resolved.Services)
+
+	// the shared stack holds the tunnels as well as the stateful services, so a
+	// project with a host block and nothing stateful still needs it. skipping it
+	// here left cloudflared unstarted and the hostname serving nothing
+	if len(stateful) == 0 && len(hosted) == 0 {
 		return nil
 	}
 
@@ -501,10 +497,11 @@ func startShared(runner Runner, layout Layout, resolved ResolvedProject) error {
 		return err
 	}
 
-	if err := startStack(runner, sharedFile, SharedProjectName(resolved.ID)); err != nil {
+	if err := startStack(runner, sharedFile, SharedProjectName(resolved.ID), EnvFileArguments(resolved, layout)...); err != nil {
 		return err
 	}
-	fmt.Printf("  shared stack up (%s)\n", strings.Join(ServiceNames(stateful), ", "))
+	running := append(ServiceNames(stateful), tunnelNames(hosted)...)
+	fmt.Printf("  shared stack up (%s)\n", strings.Join(running, ", "))
 
 	return nil
 }
@@ -553,13 +550,11 @@ func runReleaseTasks(runner Runner, resolved ResolvedProject, layout Layout, rel
 	return nil
 }
 
-func startStack(runner Runner, composeFile, projectName string) error {
-	up := []string{
-		"docker", "compose",
-		"--file", composeFile,
-		"--project-name", projectName,
-		"up", "--detach", "--wait",
-	}
+// startStack takes any extra compose arguments the caller needs, which today is
+// the env files the shared stack interpolates a tunnel token out of.
+func startStack(runner Runner, composeFile, projectName string, extra ...string) error {
+	up := append([]string{"docker", "compose", "--file", composeFile}, extra...)
+	up = append(up, "--project-name", projectName, "up", "--detach", "--wait")
 
 	if err := runner.Stream(up, os.Stdout); err != nil {
 		// compose exits non-zero with nothing useful on stdout, and by the time

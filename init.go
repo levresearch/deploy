@@ -34,6 +34,10 @@ func GenerateProjectID() (string, error) {
 func EnsureProjectConfig(repositoryPath, destination string) (bool, error) {
 	configPath := path.Join(repositoryPath, configFileName)
 
+	// always, not only when a config is created. deploy puts a build cache in
+	// .deploy/ whether or not it wrote the config, and an unignored cache makes
+	// the tree dirty, which refuses the next deploy over a directory deploy
+	// created itself
 	if _, err := os.Stat(configPath); err == nil {
 		return false, nil
 	} else if !errors.Is(err, fs.ErrNotExist) {
@@ -61,7 +65,9 @@ func EnsureProjectConfig(repositoryPath, destination string) (bool, error) {
 		return false, fmt.Errorf("writing %s: %w", configPath, err)
 	}
 
-	if err := ignoreDeployDirectory(repositoryPath); err != nil {
+	// only alongside a config deploy just wrote, so the two get committed
+	// together. nothing else deploy makes lands in the repository
+	if _, err := ignoreDeployDirectory(repositoryPath); err != nil {
 		return true, err
 	}
 
@@ -70,19 +76,19 @@ func EnsureProjectConfig(repositoryPath, destination string) (bool, error) {
 
 // ignoreDeployDirectory keeps machine-local state out of the repository. Adding
 // one line beats leaving someone to discover a build cache in their next commit.
-func ignoreDeployDirectory(repositoryPath string) error {
+func ignoreDeployDirectory(repositoryPath string) (bool, error) {
 	const entry = ".deploy/"
 
 	ignorePath := path.Join(repositoryPath, ".gitignore")
 
 	existing, err := os.ReadFile(ignorePath)
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return err
+		return false, err
 	}
 
 	for _, line := range strings.Split(string(existing), "\n") {
 		if strings.TrimSpace(line) == entry {
-			return nil
+			return false, nil
 		}
 	}
 
@@ -92,14 +98,17 @@ func ignoreDeployDirectory(repositoryPath string) error {
 	}
 	updated += entry + "\n"
 
-	return os.WriteFile(ignorePath, []byte(updated), 0o644)
+	if err := os.WriteFile(ignorePath, []byte(updated), 0o644); err != nil {
+		return false, err
+	}
+
+	return true, nil
 }
 
 // describeFreshConfig is what somebody sees the first time they run deploy in a
 // project. It names the file, what is in it, and the one thing still missing.
 func describeFreshConfig(projectID string) {
-	fmt.Printf("wrote %s with id %s\n", configFileName, projectID)
-	fmt.Printf("  and added .deploy/ to .gitignore, since that is machine-local\n\n")
+	fmt.Printf("wrote %s with id %s\n\n", configFileName, projectID)
 	fmt.Printf("  it has no services yet, and deploy cannot guess them. a service either\n")
 	fmt.Printf("  names an image to run or a build to make one:\n\n")
 	fmt.Printf("    \"services\": {\n")
