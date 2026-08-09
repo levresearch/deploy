@@ -8,7 +8,10 @@ import (
 	"strings"
 )
 
-const composeFileName = "docker-compose.yml"
+const (
+	composeFileName      = "docker-compose.yml"
+	releaseTasksFileName = "docker-compose.tasks.yml"
+)
 
 // dependsOnConditionsToCompose maps our three conditions onto what compose calls
 // them. Ours are shorter because the compose spelling reads like an enum nobody
@@ -87,6 +90,17 @@ func RenderRelease(resolved ResolvedProject, commit string) ([]byte, error) {
 	_, stateless := SplitServices(resolved.Services)
 
 	return renderProject(resolved, ProjectName(resolved.ID, commit), stateless, commit)
+}
+
+// RenderReleaseTasks is a stack nothing ever brings up. Each task is started one
+// at a time with compose run, which is what gives them env files, volumes, and
+// the shared network without any of it being restated here.
+func RenderReleaseTasks(resolved ResolvedProject, commit string) ([]byte, error) {
+	return renderProject(resolved, ReleaseTasksProjectName(resolved.ID, commit), resolved.Release, commit)
+}
+
+func ReleaseTasksProjectName(id, commit string) string {
+	return ProjectName(id, commit) + "-tasks"
 }
 
 func renderProject(

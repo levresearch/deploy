@@ -427,3 +427,11 @@ func TestSharedComposeFileSitsOutsideReleases(t *testing.T) {
 		t.Errorf("SharedComposeFile() = %q, want %q", layout.SharedComposeFile(), want)
 	}
 }
+
+func decodeService(t *testing.T, raw json.RawMessage, into any) {
+	t.Helper()
+
+	if err := json.Unmarshal(raw, into); err != nil {
+		t.Fatalf("reading service: %v", err)
+	}
+}

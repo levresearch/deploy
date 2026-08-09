@@ -337,9 +337,15 @@ func TestDockerfilePathReadsBothForms(t *testing.T) {
 	}
 }
 
+// dockerAvailable gates every test that drives real containers. Those are the
+// only slow ones, so -short is the fast loop and a full run is what proves it
+// actually works.
 func dockerAvailable(t *testing.T) {
 	t.Helper()
 
+	if testing.Short() {
+		t.Skip("skipping a real docker deploy in short mode")
+	}
 	if err := exec.Command("docker", "info").Run(); err != nil {
 		t.Skip("docker is not available on this machine")
 	}

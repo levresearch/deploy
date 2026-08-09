@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"fmt"
+	"maps"
 	"os"
 	"path"
 	"slices"
@@ -125,6 +126,10 @@ func RunDeploy(options DeployOptions) (int, error) {
 	}
 
 	if err := startShared(runner, layout, resolved); err != nil {
+		return exitDeployFailed, err
+	}
+
+	if err := runReleaseTasks(runner, resolved, releaseDirectory, commit); err != nil {
 		return exitDeployFailed, err
 	}
 
@@ -254,10 +259,16 @@ func loadResolvedConfig(repositoryPath, environmentName string) (ResolvedProject
 }
 
 // buildServices builds from the git archive rather than the working directory, so
-// the image and the release tree cannot disagree about what they contain.
+// the image and the release tree cannot disagree about what they contain. Release
+// tasks are built too, since a migration usually ships in the same image as the
+// app it migrates.
 func buildServices(runner Runner, resolved ResolvedProject, repositoryPath, commit string) error {
-	for _, name := range ServiceNames(resolved.Services) {
-		service := resolved.Services[name]
+	buildable := map[string]Service{}
+	maps.Copy(buildable, resolved.Services)
+	maps.Copy(buildable, resolved.Release)
+
+	for _, name := range ServiceNames(buildable) {
+		service := buildable[name]
 		if len(service.Build) == 0 {
 			continue
 		}
@@ -331,6 +342,50 @@ func startShared(runner Runner, layout Layout, resolved ResolvedProject) error {
 		return err
 	}
 	fmt.Printf("  shared stack up (%s)\n", strings.Join(ServiceNames(stateful), ", "))
+
+	return nil
+}
+
+// runReleaseTasks runs the one-shot work, a migration being the obvious one,
+// against the shared stack that is already up. It happens before the new stack
+// starts, so a failure here means the old release is still serving and nothing
+// about the deploy has been applied.
+func runReleaseTasks(runner Runner, resolved ResolvedProject, releaseDirectory, commit string) error {
+	if len(resolved.Release) == 0 {
+		return nil
+	}
+
+	rendered, err := RenderReleaseTasks(resolved, commit)
+	if err != nil {
+		return err
+	}
+
+	tasksFile := path.Join(releaseDirectory, releaseTasksFileName)
+	if err := runner.WriteFile(tasksFile, rendered); err != nil {
+		return err
+	}
+
+	for _, name := range ServiceNames(resolved.Release) {
+		fmt.Printf("  running release task %s\n", name)
+
+		// --no-deps because the shared stack is already up and healthy, and
+		// anything this task depends on is in it rather than in this file
+		run := []string{
+			"docker", "compose",
+			"--file", tasksFile,
+			"--project-name", ReleaseTasksProjectName(resolved.ID, commit),
+			"run", "--rm", "--no-deps", name,
+		}
+
+		// streamed rather than captured, since a migration log is exactly what
+		// you want to read when one fails
+		if err := runner.Stream(run, os.Stdout); err != nil {
+			return fmt.Errorf(
+				"release task %s failed, so the deploy stopped before starting anything new and the previous release is still serving: %w",
+				name, err,
+			)
+		}
+	}
 
 	return nil
 }
