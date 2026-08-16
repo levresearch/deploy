@@ -13,6 +13,7 @@ import (
 
 const (
 	configFileName         = ".deploy.json"
+	deployDirectoryName    = ".deploy"
 	supportedConfigVersion = 1
 	defaultRetention       = 3
 	defaultEnvironmentName = "production"
@@ -25,15 +26,20 @@ var (
 )
 
 type Project struct {
-	Version      int                    `json:"version"`
-	ID           string                 `json:"id"`
-	Name         string                 `json:"name"`
-	GitStorage   string                 `json:"gitStorage,omitempty"`
-	Destination  string                 `json:"destination,omitempty"`
-	Retention    int                    `json:"retention,omitempty"`
-	Services     map[string]Service     `json:"services"`
-	Release      map[string]Service     `json:"release,omitempty"`
-	Environments map[string]Environment `json:"environments,omitempty"`
+	Version     int    `json:"version"`
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	GitStorage  string `json:"gitStorage,omitempty"`
+	Destination string `json:"destination,omitempty"`
+	Retention   int    `json:"retention,omitempty"`
+	// BuildOnDestination belongs in the file rather than only on the command
+	// line because whether a project can be cross built is a fact about the
+	// project, not about the mood of whoever is deploying it today.
+	BuildOnDestination bool                   `json:"buildOnDestination,omitempty"`
+	Notify             *Notify                `json:"notify,omitempty"`
+	Services           map[string]Service     `json:"services"`
+	Release            map[string]Service     `json:"release,omitempty"`
+	Environments       map[string]Environment `json:"environments,omitempty"`
 }
 
 type Environment struct {
@@ -61,15 +67,17 @@ type Host struct {
 }
 
 type ResolvedProject struct {
-	Version     int                `json:"version"`
-	ID          string             `json:"id"`
-	Name        string             `json:"name"`
-	GitStorage  string             `json:"gitStorage,omitempty"`
-	Destination string             `json:"destination,omitempty"`
-	Retention   int                `json:"retention"`
-	Environment string             `json:"environment"`
-	Services    map[string]Service `json:"services"`
-	Release     map[string]Service `json:"release,omitempty"`
+	Version            int                `json:"version"`
+	ID                 string             `json:"id"`
+	Name               string             `json:"name"`
+	GitStorage         string             `json:"gitStorage,omitempty"`
+	Destination        string             `json:"destination,omitempty"`
+	Retention          int                `json:"retention"`
+	BuildOnDestination bool               `json:"buildOnDestination,omitempty"`
+	Notify             *Notify            `json:"notify,omitempty"`
+	Environment        string             `json:"environment"`
+	Services           map[string]Service `json:"services"`
+	Release            map[string]Service `json:"release,omitempty"`
 }
 
 func (service Service) IsStateful() bool {
@@ -251,15 +259,17 @@ func (project Project) ResolveEnvironment(environmentName string) (ResolvedProje
 	}
 
 	return ResolvedProject{
-		Version:     project.Version,
-		ID:          project.ID,
-		Name:        project.Name,
-		GitStorage:  project.GitStorage,
-		Destination: project.Destination,
-		Retention:   retention,
-		Environment: environmentName,
-		Services:    services,
-		Release:     release,
+		Version:            project.Version,
+		ID:                 project.ID,
+		Name:               project.Name,
+		GitStorage:         project.GitStorage,
+		Destination:        project.Destination,
+		Retention:          retention,
+		BuildOnDestination: project.BuildOnDestination,
+		Notify:             project.Notify,
+		Environment:        environmentName,
+		Services:           services,
+		Release:            release,
 	}, nil
 }
 
@@ -314,6 +324,20 @@ func (resolved ResolvedProject) Validate() error {
 	}
 	if len(resolved.Services) == 0 {
 		problems = append(problems, errors.New("no services defined"))
+	}
+	// a notify block with nothing in it is someone who meant to be told and will
+	// not be, which is worse than not configuring it at all
+	if resolved.Notify != nil && resolved.Notify.DiscordWebhookFrom == "" {
+		problems = append(problems, errors.New(
+			"notify needs discordWebhookFrom, naming the variable that holds the webhook url. the url itself does not go in this file",
+		))
+	}
+	// a webhook url here rather than a variable name is the mistake worth
+	// catching, since it commits a credential
+	if resolved.Notify != nil && strings.Contains(resolved.Notify.DiscordWebhookFrom, "://") {
+		problems = append(problems, errors.New(
+			"notify.discordWebhookFrom names the variable holding the webhook, not the webhook itself. putting the url here commits a credential to the repository",
+		))
 	}
 
 	for _, name := range slices.Sorted(maps.Keys(resolved.Services)) {

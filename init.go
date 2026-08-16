@@ -34,10 +34,9 @@ func GenerateProjectID() (string, error) {
 func EnsureProjectConfig(repositoryPath, destination string) (bool, error) {
 	configPath := path.Join(repositoryPath, configFileName)
 
-	// always, not only when a config is created. deploy puts a build cache in
-	// .deploy/ whether or not it wrote the config, and an unignored cache makes
-	// the tree dirty, which refuses the next deploy over a directory deploy
-	// created itself
+	// always, not only when a config is created. .deploy/ holds machine local
+	// state and the secrets deploy itself reads, and an unignored one both makes
+	// the tree dirty and puts a webhook url one git add away from being public
 	if _, err := os.Stat(configPath); err == nil {
 		return false, nil
 	} else if !errors.Is(err, fs.ErrNotExist) {
@@ -74,10 +73,11 @@ func EnsureProjectConfig(repositoryPath, destination string) (bool, error) {
 	return true, nil
 }
 
-// ignoreDeployDirectory keeps machine-local state out of the repository. Adding
-// one line beats leaving someone to discover a build cache in their next commit.
+// ignoreDeployDirectory keeps machine-local state out of the repository. It also
+// keeps credentials out of it, since .deploy/secrets.env lives there, so this
+// runs on every deploy and not only when a config is written.
 func ignoreDeployDirectory(repositoryPath string) (bool, error) {
-	const entry = ".deploy/"
+	const entry = deployDirectoryName + "/"
 
 	ignorePath := path.Join(repositoryPath, ".gitignore")
 

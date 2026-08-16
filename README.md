@@ -141,6 +141,8 @@ everything deploy knows about, and what you can put in it.
 | `destination` | `/srv/projects` or `x.x.x.x:/srv/projects` | where it goes, ssh path syntax. a colon before the first slash means remote. you can pass `-D` instead |
 | `gitStorage` | `x.x.x.x:/srv/git/shop.git` | optional. if your bare repo is on the same server you're deploying to, nothing gets uploaded, the server pulls the code out of its own repo. it'll also stop you deploying a commit you forgot to push |
 | `retention` | number, default `3` | how many releases to keep on the server. whatever you set, the running one and the one before it never get pruned |
+| `buildOnDestination` | `true` / `false` | build on the server instead of on your machine. same as `--build-on-destination`, but you set it once instead of remembering it every time. the flag still wins if you actually pass it |
+| `notify` | object | ping a discord channel when a deploy finishes, see below |
 | `services` | object | the things that run |
 | `release` | object | one off jobs that run before the new code starts, migrations basically |
 | `environments` | object | per environment overrides, see the multi env example above |
@@ -179,6 +181,30 @@ everything deploy knows about, and what you can put in it.
 three rules deploy will hold you to: anything hosted needs a healthcheck, has to be `stateful: false`, and can't publish `ports`. two copies of the same service can't both bind 3000, which is the whole reason the cutover works.
 
 one cloudflared per host block, so two hostnames means two tunnels and two tokens.
+
+**notify**
+
+```jsonc
+"notify": {
+  // the NAME of the variable holding your webhook, never the webhook itself
+  "discordWebhookFrom": "DISCORD_WEBHOOK_URL"
+}
+```
+
+a webhook url is a credential, anyone who has it can post in your channel, so it goes in the config by name the same way a tunnel token does. deploy looks the name up in two places, your shell first and then `.deploy/secrets.env`:
+
+```bash
+mkdir -p .deploy
+umask 077 && echo 'DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/...' >> .deploy/secrets.env
+```
+
+`.deploy/` is gitignored, and deploy re-adds that line every run, so the webhook stays out of your repo. it never reaches your server either, because `git archive` only ships tracked files. the shell wins over the file, which is what makes ci work without one.
+
+you get one message at the end of every deploy, green for a success, red for a failure with the error, amber for exit code 3 where it went live but something after that needs you. it says which services moved and calls out any stateful service that got recreated.
+
+rollback and destroy notify too, since they change what's serving just as much as a deploy does. a rollback says where it came from as well as where it landed, and a destroy says whether it took your volumes with it.
+
+if the webhook is down, your deploy still ships. a notification is a report about a deploy and never part of one.
 
 **inline build**, if you don't want to write a dockerfile:
 

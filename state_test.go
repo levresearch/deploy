@@ -1,11 +1,14 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestRecordRelease(t *testing.T) {
@@ -286,4 +289,103 @@ func TestLockBlocksASecondDeployAndForceUnlockBreaksIt(t *testing.T) {
 	again.Release()
 
 	first.Release()
+}
+
+// A lock left by a deploy that is definitely gone is not a lock, it is litter.
+// Making someone type --force-unlock after a ctrl-c teaches them to reach for
+// that flag by reflex, which is the last thing you want on a flag that exists to
+// override a safety check.
+func TestAStaleLockFromThisMachineIsClearedAutomatically(t *testing.T) {
+	layout := NewLayout(t.TempDir(), "a3f19c02")
+	runner := LocalRunner{}
+
+	// a real process that has already exited, so its pid is genuinely dead
+	finished := exec.Command("true")
+	if err := finished.Run(); err != nil {
+		t.Fatalf("running a throwaway process: %v", err)
+	}
+	deadPID := finished.Process.Pid
+
+	hostname, err := os.Hostname()
+	if err != nil {
+		t.Fatalf("reading hostname: %v", err)
+	}
+
+	if err := runner.MkdirAll(layout.Root); err != nil {
+		t.Fatalf("creating project root: %v", err)
+	}
+	writeLockFile(t, runner, layout, Lock{
+		PID: deadPID, Host: hostname, Commit: "aaaaaaa",
+		TakenAt: time.Now().Add(-5 * time.Minute).UTC(),
+	})
+
+	lock, err := AcquireLock(runner, layout, "bbbbbbb", false)
+	if err != nil {
+		t.Fatalf("a lock held by a dead process should be cleared without --force-unlock: %v", err)
+	}
+	lock.Release()
+}
+
+func TestALiveLockIsNeverClearedAutomatically(t *testing.T) {
+	layout := NewLayout(t.TempDir(), "a3f19c02")
+	runner := LocalRunner{}
+
+	hostname, err := os.Hostname()
+	if err != nil {
+		t.Fatalf("reading hostname: %v", err)
+	}
+	if err := runner.MkdirAll(layout.Root); err != nil {
+		t.Fatalf("creating project root: %v", err)
+	}
+
+	// this test's own pid is unarguably alive
+	writeLockFile(t, runner, layout, Lock{
+		PID: os.Getpid(), Host: hostname, Commit: "aaaaaaa", TakenAt: time.Now().UTC(),
+	})
+
+	if _, err := AcquireLock(runner, layout, "bbbbbbb", false); err == nil {
+		t.Fatal("a lock held by a running deploy must not be cleared")
+	}
+}
+
+// A pid on another machine means nothing here, and guessing would let two
+// deploys run at once against the same project.
+func TestALockFromAnotherMachineIsLeftAlone(t *testing.T) {
+	layout := NewLayout(t.TempDir(), "a3f19c02")
+	runner := LocalRunner{}
+
+	if err := runner.MkdirAll(layout.Root); err != nil {
+		t.Fatalf("creating project root: %v", err)
+	}
+	writeLockFile(t, runner, layout, Lock{
+		PID: 999999, Host: "some-other-laptop", Commit: "aaaaaaa",
+		TakenAt: time.Now().Add(-time.Hour).UTC(),
+	})
+
+	_, err := AcquireLock(runner, layout, "bbbbbbb", false)
+	if err == nil {
+		t.Fatal("a lock from another machine must not be cleared, even an old one")
+	}
+	if !strings.Contains(err.Error(), "--force-unlock") {
+		t.Errorf("the refusal should still name the way out, got: %v", err)
+	}
+
+	// and forcing still works, because that is what the flag is for
+	forced, err := AcquireLock(runner, layout, "bbbbbbb", true)
+	if err != nil {
+		t.Fatalf("--force-unlock should break any lock: %v", err)
+	}
+	forced.Release()
+}
+
+func writeLockFile(t *testing.T, runner Runner, layout Layout, lock Lock) {
+	t.Helper()
+
+	encoded, err := json.Marshal(lock)
+	if err != nil {
+		t.Fatalf("encoding lock: %v", err)
+	}
+	if err := runner.WriteFile(layout.LockFile(), append(encoded, '\n')); err != nil {
+		t.Fatalf("writing lock: %v", err)
+	}
 }

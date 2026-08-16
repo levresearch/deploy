@@ -133,12 +133,32 @@ func ConfirmDestroy(plan DestroyPlan, in io.Reader, out io.Writer) error {
 	return nil
 }
 
-func RunDestroy(options DeployOptions, removeVolumes bool, confirmation io.Reader) (int, error) {
+func RunDestroy(options DeployOptions, removeVolumes bool, confirmation io.Reader) (exitCode int, err error) {
+	var notifier *Notifier
+	report := DeployReport{Action: actionDestroy, VolumesRemoved: removeVolumes}
+	defer func() {
+		report.ExitCode = exitCode
+		report.Failure = err
+		notifier.Send(report)
+	}()
+
 	resolved, layout, runner, closeRunner, destination, err := openProject(options)
 	if err != nil {
 		return exitPreconditionNotMet, err
 	}
 	defer closeRunner()
+
+	report.Project = resolved.Name
+	report.Environment = resolved.Environment
+	report.Updated = ServiceNames(resolved.Services)
+
+	// the repository is found again rather than threaded out of openProject,
+	// because five other commands share that signature and none of them notify
+	if repositoryPath, err := FindRepository(destroyStartPath(options)); err == nil {
+		if notifier, err = NewNotifier(repositoryPath, resolved.Notify); err != nil {
+			return exitPreconditionNotMet, err
+		}
+	}
 
 	state, err := ReadState(runner, layout)
 	if err != nil {
@@ -166,9 +186,29 @@ func RunDestroy(options DeployOptions, removeVolumes bool, confirmation io.Reade
 	if err != nil {
 		return exitPreconditionNotMet, err
 	}
+	lock.ReleaseOnSignal()
 	defer lock.Release()
 
-	return exitOK, ExecuteDestroy(runner, layout, plan)
+	if err := ExecuteDestroy(runner, layout, plan); err != nil {
+		return exitDeployFailed, err
+	}
+
+	return exitOK, nil
+}
+
+// destroyStartPath mirrors what openProject does with an empty context, so the
+// notifier looks for secrets in the same repository the config came from.
+func destroyStartPath(options DeployOptions) string {
+	if options.Context != "" {
+		return options.Context
+	}
+
+	working, err := os.Getwd()
+	if err != nil {
+		return "."
+	}
+
+	return working
 }
 
 // ExecuteDestroy takes the plan rather than working it out again, so what gets

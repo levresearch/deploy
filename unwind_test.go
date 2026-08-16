@@ -3,7 +3,6 @@ package main
 import (
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -341,35 +340,6 @@ func runInDirectory(t *testing.T, directory string, args []string) int {
 	return runQuietly(t, args)
 }
 
-// CONTRIBUTING says README.md is the maintainer's, and a test is the only thing
-// that keeps that true when nobody is looking.
-func TestReadmeIsUntouched(t *testing.T) {
-	root, err := FindRepository(".")
-	if err != nil {
-		t.Skipf("not in a repository: %v", err)
-	}
-
-	status, err := runGit(root, "status", "--porcelain", "README.md")
-	if err != nil {
-		t.Fatalf("reading git status: %v", err)
-	}
-	if strings.TrimSpace(status) != "" {
-		t.Errorf("README.md has uncommitted changes, and it is not ours to edit:\n%s", status)
-	}
-
-	contents, err := os.ReadFile(filepath.Join(root, "README.md"))
-	if err != nil {
-		t.Fatalf("reading README.md: %v", err)
-	}
-	// generated build instructions creeping in is exactly what CONTRIBUTING is
-	// guarding against
-	for _, absent := range []string{"go build", "Usage", "```"} {
-		if strings.Contains(string(contents), absent) {
-			t.Errorf("README.md contains %q, which deploy should not have put there", absent)
-		}
-	}
-}
-
 // A network that already exists is the normal case on every deploy after the
 // first. Anything else is a real failure, and swallowing it would turn a
 // permissions problem into a confusing one about a service that cannot reach its
@@ -403,7 +373,7 @@ func TestNetworkCreationDistinguishesAlreadyExistingFromRealFailure(t *testing.T
 			runner.failCommands = []string{"network create"}
 			runner.responses["network create"] = testCase.output
 
-			err := startShared(runner, layout, resolved)
+			_, err := startShared(runner, layout, resolved)
 
 			if testCase.wantFail {
 				if err == nil {

@@ -427,3 +427,63 @@ func TestTheSharedStackStartsForTunnelsEvenWithNothingStateful(t *testing.T) {
 		t.Errorf("expected a cloudflared in the shared stack, got %v", shared.Services)
 	}
 }
+
+// A project can be nothing but databases. Compose refuses to bring up a file
+// with no services in it, so deploy has to not ask, and the release still has to
+// be placed and recorded so that adding an app later is an ordinary deploy.
+func TestAProjectOfOnlyStatefulServicesDeploys(t *testing.T) {
+	dockerAvailable(t)
+
+	repository := newRepository(t)
+	writeFile(t, repository, configFileName, `{
+      "version": 1,
+      "id": "dd000014",
+      "name": "databasesonly",
+      "services": {
+        "store": {
+          "image": "busybox:latest",
+          "stateful": true,
+          "command": ["sh", "-c", "sleep 300"],
+          "volumes": ["data:/data"],
+          "healthcheck": {"command": ["CMD", "true"], "interval": "1s", "retries": 5}
+        }
+      }
+    }`)
+	commit := commitFile(t, repository, "one.txt", "x")
+
+	destination := t.TempDir()
+	t.Cleanup(func() {
+		exec.Command("docker", "compose", "--project-name", SharedProjectName("dd000014"), "down").Run()
+		exec.Command("docker", "volume", "rm", "-f", VolumeName("dd000014", "data")).Run()
+		exec.Command("docker", "network", "rm", NetworkName("dd000014")).Run()
+	})
+
+	exitCode, err := RunDeploy(DeployOptions{
+		Context: repository, Destination: destination, Environment: defaultEnvironmentName,
+	})
+	if err != nil {
+		t.Fatalf("a project of only stateful services should deploy: %v", err)
+	}
+	if exitCode != exitOK {
+		t.Errorf("exit code = %d, want %d", exitCode, exitOK)
+	}
+
+	// the stateful service is running
+	running, err := exec.Command("docker", "ps", "--format", "{{.Names}}").Output()
+	if err != nil {
+		t.Fatalf("listing containers: %v", err)
+	}
+	if !strings.Contains(string(running), SharedProjectName("dd000014")) {
+		t.Error("the shared stack should be up")
+	}
+
+	// and the release was still placed and recorded, so adding an app later is
+	// just another deploy
+	state, err := ReadState(LocalRunner{}, NewLayout(destination, "dd000014"))
+	if err != nil {
+		t.Fatalf("ReadState: %v", err)
+	}
+	if state.Current != ShortCommit(commit) {
+		t.Errorf("current = %q, want %q", state.Current, ShortCommit(commit))
+	}
+}

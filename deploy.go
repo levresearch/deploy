@@ -19,7 +19,9 @@ type DeployOptions struct {
 	Environment string
 	AllowDirty  bool
 	ForceUnlock bool
-	BuildOnDest bool
+	// BuildOnDest is nil when the flag was not given, so that an unset flag
+	// falls through to the config rather than silently overriding it with false.
+	BuildOnDest *bool
 }
 
 // Layout is where everything for one project lives on the destination. Volumes
@@ -53,7 +55,18 @@ func (layout Layout) SharedComposeFile() string {
 	return path.Join(layout.Root, "shared", composeFileName)
 }
 
-func RunDeploy(options DeployOptions) (int, error) {
+func RunDeploy(options DeployOptions) (exitCode int, err error) {
+	// the report is filled in as the deploy goes and sent from a defer, so a
+	// failure halfway through still says how far it got. a nil notifier is the
+	// ordinary case of a project that configured none, and Send tolerates it
+	var notifier *Notifier
+	report := DeployReport{Action: actionDeploy}
+	defer func() {
+		report.ExitCode = exitCode
+		report.Failure = err
+		notifier.Send(report)
+	}()
+
 	startPath := options.Context
 	if startPath == "" {
 		working, err := os.Getwd()
@@ -84,10 +97,23 @@ func RunDeploy(options DeployOptions) (int, error) {
 		return exitPreconditionNotMet, err
 	}
 
+	report.Project = resolved.Name
+	report.Environment = resolved.Environment
+	_, stateless := SplitServices(resolved.Services)
+	report.Updated = ServiceNames(stateless)
+
+	// resolved here rather than at the end, so a project that means to be told
+	// about its deploys finds out it cannot be before it waits on a build
+	notifier, err = NewNotifier(repositoryPath, resolved.Notify)
+	if err != nil {
+		return exitPreconditionNotMet, err
+	}
+
 	commit, err := ResolveCommit(repositoryPath, "HEAD")
 	if err != nil {
 		return exitPreconditionNotMet, err
 	}
+	report.Commit = ShortCommit(commit)
 
 	if !options.AllowDirty {
 		dirty, err := IsWorkingTreeDirty(repositoryPath)
@@ -139,7 +165,9 @@ func RunDeploy(options DeployOptions) (int, error) {
 
 	// the cross build toolchain is a precondition like any other, so a missing
 	// buildx fails here rather than after a release has been placed
-	builder, err := NewBuilder(runner, facts, resolved.ID, repositoryPath, destination.IsRemote(), options.BuildOnDest)
+	buildOnDestination := resolveBuildOnDestination(options.BuildOnDest, resolved.BuildOnDestination)
+
+	builder, err := NewBuilder(runner, facts, resolved.ID, repositoryPath, destination.IsRemote(), buildOnDestination)
 	if err != nil {
 		return exitPreconditionNotMet, err
 	}
@@ -153,6 +181,7 @@ func RunDeploy(options DeployOptions) (int, error) {
 	if err != nil {
 		return exitPreconditionNotMet, err
 	}
+	lock.ReleaseOnSignal()
 	defer lock.Release()
 
 	state, err := ReadState(runner, layout)
@@ -177,9 +206,11 @@ func RunDeploy(options DeployOptions) (int, error) {
 		return exitDeployFailed, err
 	}
 
-	if err := startShared(runner, layout, resolved); err != nil {
+	recreated, err := startShared(runner, layout, resolved)
+	if err != nil {
 		return exitDeployFailed, err
 	}
+	report.Recreated = recreated
 
 	if err := runReleaseTasks(runner, resolved, layout, releaseDirectory, commit); err != nil {
 		return exitDeployFailed, err
@@ -194,10 +225,17 @@ func RunDeploy(options DeployOptions) (int, error) {
 		return exitDeployFailed, err
 	}
 
-	if err := startStack(runner, composeFile, ProjectName(resolved.ID, commit)); err != nil {
-		return exitDeployFailed, err
+	// a project can be nothing but databases, and compose refuses to bring up a
+	// file with no services in it. the release is still placed and recorded, so
+	// adding an app later is an ordinary deploy rather than a special case
+	if _, stateless := SplitServices(resolved.Services); len(stateless) > 0 {
+		if err := startStack(runner, composeFile, ProjectName(resolved.ID, commit)); err != nil {
+			return exitDeployFailed, err
+		}
+		fmt.Printf("  %s is up\n", ProjectName(resolved.ID, commit))
+	} else {
+		fmt.Printf("  nothing to run per commit, this project is all stateful services\n")
 	}
-	fmt.Printf("  %s is up\n", ProjectName(resolved.ID, commit))
 
 	if err := Cutover(runner, resolved, layout, state.Current, commit); err != nil {
 		return exitDeployFailed, err
@@ -368,6 +406,17 @@ func freshProjectID(repositoryPath string) string {
 	return project.ID
 }
 
+// resolveBuildOnDestination gives an explicitly given flag the final say, so
+// leaving the flag off means "whatever the project says" rather than "build
+// here", and passing it means what you just typed.
+func resolveBuildOnDestination(fromFlag *bool, fromConfig bool) bool {
+	if fromFlag != nil {
+		return *fromFlag
+	}
+
+	return fromConfig
+}
+
 // resolveGitStorage is optional, so an unset one is not an error. It only ever
 // unlocks the faster path.
 func resolveGitStorage(fromFlag, fromConfig string) (Destination, error) {
@@ -446,7 +495,7 @@ func tunnelNames(hosted []string) []string {
 // every deploy and compared with what is already there, because "bring it up if
 // it is not running" would mean a changed postgres image, a new volume, or an
 // edited command silently never taking effect.
-func startShared(runner Runner, layout Layout, resolved ResolvedProject) error {
+func startShared(runner Runner, layout Layout, resolved ResolvedProject) (recreated []string, err error) {
 	network := NetworkName(resolved.ID)
 	if output, err := runner.Run([]string{"docker", "network", "create", network}); err != nil {
 		// a network that already exists is the normal case on every deploy after
@@ -454,14 +503,14 @@ func startShared(runner Runner, layout Layout, resolved ResolvedProject) error {
 		// a permissions problem into a confusing one about a service that cannot
 		// reach its database
 		if !strings.Contains(string(output), "already exists") {
-			return fmt.Errorf(
+			return nil, fmt.Errorf(
 				"creating network %s on %s: %s", network, runner.Describe(), firstLine(output),
 			)
 		}
 	}
 	for _, volume := range VolumesFor(resolved) {
 		if _, err := runner.Run([]string{"docker", "volume", "create", volume}); err != nil {
-			return fmt.Errorf("creating volume %s: %w", volume, err)
+			return nil, fmt.Errorf("creating volume %s: %w", volume, err)
 		}
 	}
 
@@ -472,18 +521,19 @@ func startShared(runner Runner, layout Layout, resolved ResolvedProject) error {
 	// project with a host block and nothing stateful still needs it. skipping it
 	// here left cloudflared unstarted and the hostname serving nothing
 	if len(stateful) == 0 && len(hosted) == 0 {
-		return nil
+		return nil, nil
 	}
 
 	rendered, err := RenderShared(resolved, layout)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	sharedFile := layout.SharedComposeFile()
 	previous, _ := runner.ReadFile(sharedFile)
 
 	if len(previous) > 0 && !bytes.Equal(previous, rendered) {
+		recreated = ServiceNames(stateful)
 		fmt.Printf(
 			"  shared stack changed, so %s will be recreated. stateful services take a real outage here\n",
 			strings.Join(ServiceNames(stateful), ", "),
@@ -491,19 +541,19 @@ func startShared(runner Runner, layout Layout, resolved ResolvedProject) error {
 	}
 
 	if err := runner.MkdirAll(path.Dir(sharedFile)); err != nil {
-		return err
+		return nil, err
 	}
 	if err := runner.WriteFile(sharedFile, rendered); err != nil {
-		return err
+		return nil, err
 	}
 
 	if err := startStack(runner, sharedFile, SharedProjectName(resolved.ID), EnvFileArguments(resolved, layout)...); err != nil {
-		return err
+		return nil, err
 	}
 	running := append(ServiceNames(stateful), tunnelNames(hosted)...)
 	fmt.Printf("  shared stack up (%s)\n", strings.Join(running, ", "))
 
-	return nil
+	return recreated, nil
 }
 
 // runReleaseTasks runs the one-shot work, a migration being the obvious one,

@@ -67,7 +67,15 @@ func (state State) RecordRollback(target string) State {
 	return state
 }
 
-func RunRollback(options DeployOptions, requested string) (int, error) {
+func RunRollback(options DeployOptions, requested string) (exitCode int, err error) {
+	var notifier *Notifier
+	report := DeployReport{Action: actionRollback}
+	defer func() {
+		report.ExitCode = exitCode
+		report.Failure = err
+		notifier.Send(report)
+	}()
+
 	startPath := options.Context
 	if startPath == "" {
 		working, err := os.Getwd()
@@ -83,6 +91,16 @@ func RunRollback(options DeployOptions, requested string) (int, error) {
 	}
 
 	resolved, err := loadResolvedConfig(repositoryPath, options.Environment)
+	if err != nil {
+		return exitPreconditionNotMet, err
+	}
+
+	report.Project = resolved.Name
+	report.Environment = resolved.Environment
+	_, stateless := SplitServices(resolved.Services)
+	report.Updated = ServiceNames(stateless)
+
+	notifier, err = NewNotifier(repositoryPath, resolved.Notify)
 	if err != nil {
 		return exitPreconditionNotMet, err
 	}
@@ -112,6 +130,7 @@ func RunRollback(options DeployOptions, requested string) (int, error) {
 	if err != nil {
 		return exitPreconditionNotMet, err
 	}
+	lock.ReleaseOnSignal()
 	defer lock.Release()
 
 	state, err := ReadState(runner, layout)
@@ -130,6 +149,8 @@ func RunRollback(options DeployOptions, requested string) (int, error) {
 	}
 
 	leaving := state.Current
+	report.Commit = target
+	report.From = leaving
 	fmt.Printf("rolling %s back from %s to %s on %s\n", resolved.Name, leaving, target, destination)
 
 	// nothing is built and nothing is transferred, because the release and its

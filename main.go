@@ -70,10 +70,19 @@ func runDeploy(args []string) int {
 	stringFlag(flags, &options.Environment, "environment", "e", defaultEnvironmentName, "environment to resolve")
 	flags.BoolVar(&options.AllowDirty, "allow-dirty", false, "deploy with uncommitted changes present")
 	flags.BoolVar(&options.ForceUnlock, "force-unlock", false, "break a stale deploy.lock")
-	flags.BoolVar(&options.BuildOnDest, "build-on-destination", false, "let the destination build instead of building here")
+	var buildOnDestination bool
+	flags.BoolVar(&buildOnDestination, "build-on-destination", false, "let the destination build instead of building here")
 	if keepGoing, exitCode := parseCommandFlags(flags, args); !keepGoing {
 		return exitCode
 	}
+
+	// only an explicitly given flag overrides the config, so that leaving it off
+	// means "whatever the project says" rather than "build here"
+	flags.Visit(func(given *flag.Flag) {
+		if given.Name == "build-on-destination" {
+			options.BuildOnDest = &buildOnDestination
+		}
+	})
 
 	exitCode, err := RunDeploy(options)
 	if err != nil {
@@ -336,7 +345,9 @@ flags:
       --allow-dirty         deploy with uncommitted changes present
       --force-unlock        break a stale deploy.lock
       --build-on-destination
-                            build on the destination instead of here
+                            build on the destination instead of here.
+                            buildOnDestination in .deploy.json does the
+                            same without the typing
   -e, --environment <name>  environment to resolve, default "`+defaultEnvironmentName+`"
   -h, --help                show this help
 `)

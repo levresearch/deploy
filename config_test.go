@@ -405,3 +405,65 @@ func TestValidationReportsEveryProblemAtOnce(t *testing.T) {
 		}
 	}
 }
+
+// Whether a project can be cross built is a fact about the project, so it
+// belongs in the file. The flag stays, but only an explicitly given one
+// overrides what the file says.
+func TestBuildOnDestinationCanComeFromTheConfig(t *testing.T) {
+	cases := []struct {
+		name       string
+		config     string
+		fromFlag   *bool
+		wantOnDest bool
+	}{
+		{
+			name:       "absent from both means build here",
+			config:     `{"version":1,"id":"a3f19c02","name":"x","services":{"app":{"image":"busybox"}}}`,
+			wantOnDest: false,
+		},
+		{
+			name:       "the config alone turns it on",
+			config:     `{"version":1,"id":"a3f19c02","name":"x","buildOnDestination":true,"services":{"app":{"image":"busybox"}}}`,
+			wantOnDest: true,
+		},
+		{
+			name:       "the flag alone turns it on",
+			config:     `{"version":1,"id":"a3f19c02","name":"x","services":{"app":{"image":"busybox"}}}`,
+			fromFlag:   boolPointer(true),
+			wantOnDest: true,
+		},
+		{
+			name:       "an explicit false flag overrides a config that says true",
+			config:     `{"version":1,"id":"a3f19c02","name":"x","buildOnDestination":true,"services":{"app":{"image":"busybox"}}}`,
+			fromFlag:   boolPointer(false),
+			wantOnDest: false,
+		},
+	}
+
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			configPath := filepath.Join(t.TempDir(), configFileName)
+			if err := os.WriteFile(configPath, []byte(testCase.config), 0o644); err != nil {
+				t.Fatalf("writing config: %v", err)
+			}
+
+			project, err := LoadProject(configPath)
+			if err != nil {
+				t.Fatalf("LoadProject: %v", err)
+			}
+			resolved, err := project.ResolveEnvironment(defaultEnvironmentName)
+			if err != nil {
+				t.Fatalf("ResolveEnvironment: %v", err)
+			}
+
+			got := resolveBuildOnDestination(testCase.fromFlag, resolved.BuildOnDestination)
+			if got != testCase.wantOnDest {
+				t.Errorf("build on destination = %v, want %v", got, testCase.wantOnDest)
+			}
+		})
+	}
+}
+
+func boolPointer(value bool) *bool {
+	return &value
+}
