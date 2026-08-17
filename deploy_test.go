@@ -431,7 +431,11 @@ func TestDeployEndToEnd(t *testing.T) {
 func writeFile(t *testing.T, directory, name, contents string) {
 	t.Helper()
 
-	if err := os.WriteFile(filepath.Join(directory, name), []byte(contents), 0o644); err != nil {
+	full := filepath.Join(directory, name)
+	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+		t.Fatalf("creating %s: %v", filepath.Dir(full), err)
+	}
+	if err := os.WriteFile(full, []byte(contents), 0o644); err != nil {
 		t.Fatalf("writing %s: %v", name, err)
 	}
 }

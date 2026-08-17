@@ -19,6 +19,11 @@ type DeployOptions struct {
 	Environment string
 	AllowDirty  bool
 	ForceUnlock bool
+	// Affected narrows the build to the services a change actually reached. It
+	// is a flag and never a config key, because a base image moving is invisible
+	// to git, so this is something you reach for on a change you know is narrow
+	// rather than something a config quietly does to every deploy forever.
+	Affected bool
 	// BuildOnDest is nil when the flag was not given, so that an unset flag
 	// falls through to the config rather than silently overriding it with false.
 	BuildOnDest *bool
@@ -114,6 +119,18 @@ func RunDeploy(options DeployOptions) (exitCode int, err error) {
 		return exitPreconditionNotMet, err
 	}
 
+	// checked before anything is placed, since a layout --affected cannot answer
+	// safely is a property of the config rather than of this particular run
+	if options.Affected {
+		claims, err := ServiceClaims(resolved)
+		if err != nil {
+			return exitPreconditionNotMet, err
+		}
+		if err := CheckClaims(claims); err != nil {
+			return exitPreconditionNotMet, err
+		}
+	}
+
 	commit, err := ResolveCommit(repositoryPath, "HEAD")
 	if err != nil {
 		return exitPreconditionNotMet, err
@@ -206,8 +223,16 @@ func RunDeploy(options DeployOptions) (exitCode int, err error) {
 		fmt.Printf("  placed release in %s\n", releaseDirectory)
 	}
 
+	var reuse map[string]string
+	if options.Affected {
+		reuse, err = PlanReuse(builder, resolved, repositoryPath, state.Current, commit)
+		if err != nil {
+			return exitDeployFailed, err
+		}
+	}
+
 	builder.SetReleaseDirectory(releaseDirectory)
-	if err := buildServices(builder, resolved, repositoryPath, commit); err != nil {
+	if err := buildServices(builder, resolved, repositoryPath, commit, reuse); err != nil {
 		return exitDeployFailed, err
 	}
 
@@ -475,14 +500,36 @@ func loadResolvedConfig(repositoryPath, environmentName string) (ResolvedProject
 
 // buildServices builds everything with a build key. Release tasks are included,
 // since a migration usually ships in the same image as the app it migrates.
-func buildServices(builder *Builder, resolved ResolvedProject, repositoryPath, commit string) error {
+// buildableServices is every service a deploy might have to build, which is the
+// release stack plus the one off tasks, since a migration is built the same way
+// anything else is.
+func buildableServices(resolved ResolvedProject) map[string]Service {
 	buildable := map[string]Service{}
 	maps.Copy(buildable, resolved.Services)
 	maps.Copy(buildable, resolved.Release)
 
+	return buildable
+}
+
+// buildServices makes every image the release needs. reuse names the services
+// that an earlier commit already built an identical image for, which is empty
+// unless --affected worked out that it could be.
+func buildServices(
+	builder *Builder, resolved ResolvedProject, repositoryPath, commit string, reuse map[string]string,
+) error {
+	buildable := buildableServices(resolved)
+
 	for _, name := range ServiceNames(buildable) {
 		service := buildable[name]
 		if len(service.Build) == 0 {
+			continue
+		}
+
+		if from, isReused := reuse[name]; isReused {
+			if err := builder.Reuse(name, from, commit); err != nil {
+				return err
+			}
+
 			continue
 		}
 

@@ -181,6 +181,31 @@ func (builder *Builder) Build(
 	return builder.verifyArchitecture(tag)
 }
 
+// HasImage answers whether the destination can still run an image an earlier
+// commit built, which retention or somebody pruning by hand may have taken since.
+func (builder *Builder) HasImage(serviceName, commit string) bool {
+	_, err := builder.destination.Run(
+		[]string{"docker", "image", "inspect", ImageTag(builder.projectID, serviceName, commit)},
+	)
+
+	return err == nil
+}
+
+// Reuse points this commit's tag at the image an earlier commit already built.
+// Everything downstream keeps naming images by the commit being deployed, so
+// compose, rollback, and pruning never learn that a build was skipped.
+func (builder *Builder) Reuse(serviceName, from, commit string) error {
+	existing := ImageTag(builder.projectID, serviceName, from)
+	tag := ImageTag(builder.projectID, serviceName, commit)
+
+	if output, err := builder.destination.Run([]string{"docker", "tag", existing, tag}); err != nil {
+		return fmt.Errorf("reusing %s as %s: %s", existing, tag, firstLine(output))
+	}
+	fmt.Printf("  reusing %s as %s\n", existing, tag)
+
+	return nil
+}
+
 // buildOnDestination builds from the release tree already placed there, which is
 // why it is the one path that does not stream a context.
 func (builder *Builder) buildOnDestination(
