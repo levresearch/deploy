@@ -56,15 +56,20 @@ func (layout Layout) SharedComposeFile() string {
 }
 
 func RunDeploy(options DeployOptions) (exitCode int, err error) {
-	// the report is filled in as the deploy goes and sent from a defer, so a
-	// failure halfway through still says how far it got. a nil notifier is the
-	// ordinary case of a project that configured none, and Send tolerates it
+	// the channel is read by the people using this thing, not by whoever ran the
+	// command, so nothing is said until there is a healthy new version standing
+	// up. a lock somebody else holds, or a dirty tree, is not their business.
+	// once something has been said the arc always finishes, either live or
+	// cancelled, so nobody is left on a switching over message forever
 	var notifier *Notifier
-	report := DeployReport{Action: actionDeploy}
+	var announced bool
+	var affected []string
+	var versions StageVersions
+	projectName := ""
 	defer func() {
-		report.ExitCode = exitCode
-		report.Failure = err
-		notifier.Send(report)
+		if announced && err != nil {
+			notifier.SendStage(stageCancelled, projectName, affected, versions)
+		}
 	}()
 
 	startPath := options.Context
@@ -97,10 +102,9 @@ func RunDeploy(options DeployOptions) (exitCode int, err error) {
 		return exitPreconditionNotMet, err
 	}
 
-	report.Project = resolved.Name
-	report.Environment = resolved.Environment
+	projectName = resolved.Name
 	_, stateless := SplitServices(resolved.Services)
-	report.Updated = ServiceNames(stateless)
+	affected = AffectedNames(stateless)
 
 	// resolved here rather than at the end, so a project that means to be told
 	// about its deploys finds out it cannot be before it waits on a build
@@ -113,7 +117,6 @@ func RunDeploy(options DeployOptions) (exitCode int, err error) {
 	if err != nil {
 		return exitPreconditionNotMet, err
 	}
-	report.Commit = ShortCommit(commit)
 
 	if !options.AllowDirty {
 		dirty, err := IsWorkingTreeDirty(repositoryPath)
@@ -188,6 +191,7 @@ func RunDeploy(options DeployOptions) (exitCode int, err error) {
 	if err != nil {
 		return exitPreconditionNotMet, err
 	}
+	versions = StageVersions{Previous: state.Current, Incoming: ShortCommit(commit)}
 
 	releaseDirectory := layout.Release(commit)
 	if err := PlaceRelease(
@@ -206,11 +210,9 @@ func RunDeploy(options DeployOptions) (exitCode int, err error) {
 		return exitDeployFailed, err
 	}
 
-	recreated, err := startShared(runner, layout, resolved)
-	if err != nil {
+	if _, err := startShared(runner, layout, resolved); err != nil {
 		return exitDeployFailed, err
 	}
-	report.Recreated = recreated
 
 	if err := runReleaseTasks(runner, resolved, layout, releaseDirectory, commit); err != nil {
 		return exitDeployFailed, err
@@ -233,12 +235,21 @@ func RunDeploy(options DeployOptions) (exitCode int, err error) {
 			return exitDeployFailed, err
 		}
 		fmt.Printf("  %s is up\n", ProjectName(resolved.ID, commit))
+
+		// healthy, and standing beside whatever is still serving. this is the
+		// first moment there is anything true to tell anyone
+		notifier.SendStage(stageReady, projectName, affected, versions)
+		announced = true
 	} else {
 		fmt.Printf("  nothing to run per commit, this project is all stateful services\n")
 	}
 
-	if err := Cutover(runner, resolved, layout, state.Current, commit); err != nil {
+	if err := Cutover(runner, resolved, layout, state.Current, commit, notifier, projectName, affected, versions); err != nil {
 		return exitDeployFailed, err
+	}
+
+	if announced {
+		notifier.SendStage(stageLive, projectName, affected, versions)
 	}
 
 	// everything past here has already put the new release in service, so a

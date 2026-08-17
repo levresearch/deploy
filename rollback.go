@@ -68,12 +68,20 @@ func (state State) RecordRollback(target string) State {
 }
 
 func RunRollback(options DeployOptions, requested string) (exitCode int, err error) {
+	// announced before the attempt rather than after it, so the message is what
+	// somebody wants to read while it happens. a rollback that never got as far
+	// as moving anything says so, and one that landed needs no second message
+	// because the whole thing takes under a second
 	var notifier *Notifier
-	report := DeployReport{Action: actionRollback}
+	var announced, switched bool
+	var projectName, stillServing string
+	var affected []string
 	defer func() {
-		report.ExitCode = exitCode
-		report.Failure = err
-		notifier.Send(report)
+		if announced && !switched && err != nil {
+			notifier.SendStage(
+				stageRollbackFailed, projectName, affected, StageVersions{Incoming: stillServing},
+			)
+		}
 	}()
 
 	startPath := options.Context
@@ -95,10 +103,9 @@ func RunRollback(options DeployOptions, requested string) (exitCode int, err err
 		return exitPreconditionNotMet, err
 	}
 
-	report.Project = resolved.Name
-	report.Environment = resolved.Environment
+	projectName = resolved.Name
 	_, stateless := SplitServices(resolved.Services)
-	report.Updated = ServiceNames(stateless)
+	affected = AffectedNames(stateless)
 
 	notifier, err = NewNotifier(repositoryPath, resolved.Notify)
 	if err != nil {
@@ -149,9 +156,11 @@ func RunRollback(options DeployOptions, requested string) (exitCode int, err err
 	}
 
 	leaving := state.Current
-	report.Commit = target
-	report.From = leaving
+	stillServing = leaving
 	fmt.Printf("rolling %s back from %s to %s on %s\n", resolved.Name, leaving, target, destination)
+
+	notifier.SendStage(stageRollingBack, projectName, affected, StageVersions{Previous: target, Incoming: leaving})
+	announced = true
 
 	// nothing is built and nothing is transferred, because the release and its
 	// images are already sitting there. that is what makes this the fastest thing
@@ -165,6 +174,7 @@ func RunRollback(options DeployOptions, requested string) (exitCode int, err err
 	// the release being left is only stopped once the older one is proven healthy,
 	// so a rollback that cannot start leaves you no worse off
 	stopRelease(runner, resolved.ID, leaving, path.Join(layout.Release(leaving), composeFileName))
+	switched = true
 
 	state = state.RecordRollback(target)
 	if err := WriteState(runner, layout, state); err != nil {

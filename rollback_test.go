@@ -435,7 +435,7 @@ func TestAHostedProjectTakesTheCutoverPath(t *testing.T) {
 
 	// it probes and stops rather than going straight to removing, which is what
 	// an unhosted project does
-	_ = Cutover(runner, resolved, NewLayout("/srv/projects", "a3f19c02"), "aaaaaaa", "bbbbbbb")
+	_ = Cutover(runner, resolved, NewLayout("/srv/projects", "a3f19c02"), "aaaaaaa", "bbbbbbb", nil, "", nil, StageVersions{})
 
 	if len(runner.steps) == 0 || runner.steps[0] != "probe network" {
 		t.Errorf("a hosted project checks reachability first, got %v", runner.steps)

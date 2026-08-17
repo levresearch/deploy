@@ -2,13 +2,13 @@ package main
 
 import (
 	"encoding/json"
-	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -47,128 +47,6 @@ func fieldsOf(t *testing.T, embed map[string]any) map[string]string {
 	return found
 }
 
-func TestTheNotificationSaysWhatHappenedAndWhichServicesMoved(t *testing.T) {
-	report := DeployReport{
-		Project: "shop", Commit: "9f4be0a", Environment: "production",
-		Updated: []string{"api", "web"}, ExitCode: exitOK,
-	}
-
-	payload, err := report.DiscordPayload()
-	if err != nil {
-		t.Fatalf("DiscordPayload: %v", err)
-	}
-
-	embed := decodeEmbed(t, payload)
-	if title, _ := embed["title"].(string); !strings.Contains(title, "shop") || !strings.Contains(title, "9f4be0a") {
-		t.Errorf("the title should name the project and commit, got %q", title)
-	}
-	if colour, _ := embed["color"].(float64); int(colour) != 0x2ecc71 {
-		t.Errorf("a success should be green, got %#x", int(colour))
-	}
-
-	fields := fieldsOf(t, embed)
-	if fields["Services updated"] != "api, web" {
-		t.Errorf("services updated = %q, want the list of stateless services", fields["Services updated"])
-	}
-	if fields["Environment"] != "production" {
-		t.Errorf("environment = %q", fields["Environment"])
-	}
-	// a destination and a duration are deliberately absent: the channel wants to
-	// know what moved, not where from or how long it sat there
-	for _, unwanted := range []string{"Destination", "Took"} {
-		if _, present := fields[unwanted]; present {
-			t.Errorf("the embed should not carry a %s field", unwanted)
-		}
-	}
-	if _, reported := fields["Error"]; reported {
-		t.Error("a successful deploy should carry no error field")
-	}
-}
-
-func TestAFailedDeployIsRedCarriesTheErrorAndDoesNotClaimAnythingUpdated(t *testing.T) {
-	report := DeployReport{
-		Project: "shop", Commit: "9f4be0a", Environment: "production",
-		Updated:  []string{"api", "web"},
-		ExitCode: exitDeployFailed,
-		Failure:  errors.New("api never became healthy"),
-	}
-
-	embed := decodeEmbed(t, mustPayload(t, report))
-	if colour, _ := embed["color"].(float64); int(colour) != 0xe74c3c {
-		t.Errorf("a failure should be red, got %#x", int(colour))
-	}
-	if title, _ := embed["title"].(string); !strings.Contains(title, "failed") {
-		t.Errorf("the title should say it failed, got %q", title)
-	}
-
-	fields := fieldsOf(t, embed)
-	if fields["Error"] != "api never became healthy" {
-		t.Errorf("the error should be reported, got %q", fields["Error"])
-	}
-	// the deploy failed, so nothing was updated, and a field saying otherwise
-	// would be a notification that lies
-	if _, claimed := fields["Services updated"]; claimed {
-		t.Error("a failed deploy must not report services as updated")
-	}
-	if fields["Services attempted"] != "api, web" {
-		t.Errorf("a failure should still say what it was trying to move, got %q", fields["Services attempted"])
-	}
-}
-
-// Exit code 3 is its own outcome: the release is serving but something after the
-// cutover needs a human. Folding it into either green or red loses the one case
-// where somebody has to go and look.
-func TestLiveButNeedsAHumanIsItsOwnColour(t *testing.T) {
-	report := DeployReport{
-		Project: "shop", Commit: "9f4be0a",
-		ExitCode: exitLiveButNeedsAHuman,
-		Failure:  errors.New("pruning old releases failed"),
-	}
-
-	embed := decodeEmbed(t, mustPayload(t, report))
-	if colour, _ := embed["color"].(float64); int(colour) != 0xf39c12 {
-		t.Errorf("live but needs a human should be amber, got %#x", int(colour))
-	}
-	if title, _ := embed["title"].(string); !strings.Contains(title, "live") {
-		t.Errorf("the title should say it is live, got %q", title)
-	}
-}
-
-func TestRecreatedStatefulServicesAreCalledOut(t *testing.T) {
-	report := DeployReport{
-		Project: "shop", Commit: "9f4be0a", ExitCode: exitOK,
-		Updated: []string{"web"}, Recreated: []string{"pg"},
-	}
-
-	fields := fieldsOf(t, decodeEmbed(t, mustPayload(t, report)))
-	if fields["Stateful services recreated"] != "pg" {
-		t.Errorf("a stateful outage should be reported, got %q", fields["Stateful services recreated"])
-	}
-
-	// and stays absent on the ordinary deploy, which is almost all of them
-	quiet := fieldsOf(t, decodeEmbed(t, mustPayload(t, DeployReport{ExitCode: exitOK, Updated: []string{"web"}})))
-	if _, reported := quiet["Stateful services recreated"]; reported {
-		t.Error("a deploy that recreated nothing should not mention it")
-	}
-}
-
-// Discord rejects an oversized field with a 400 nobody reads, and a deploy
-// failure message can carry a whole compose log.
-func TestAnEnormousErrorIsTrimmedToFitRatherThanRejected(t *testing.T) {
-	report := DeployReport{
-		Project: "shop", Commit: "9f4be0a", ExitCode: exitDeployFailed,
-		Failure: errors.New(strings.Repeat("x", 5000)),
-	}
-
-	fields := fieldsOf(t, decodeEmbed(t, mustPayload(t, report)))
-	if length := len(fields["Error"]); length > discordFieldLimit {
-		t.Errorf("the error field is %d characters, over Discord's %d limit", length, discordFieldLimit)
-	}
-	if !strings.HasSuffix(fields["Error"], "...") {
-		t.Error("a trimmed value should show that it was trimmed")
-	}
-}
-
 func TestTheNotifierPostsToTheWebhook(t *testing.T) {
 	var got []byte
 	var contentType string
@@ -181,12 +59,12 @@ func TestTheNotifierPostsToTheWebhook(t *testing.T) {
 	defer webhook.Close()
 
 	notifier := &Notifier{webhookURL: webhook.URL, client: webhook.Client()}
-	notifier.Send(DeployReport{Project: "shop", Commit: "9f4be0a", ExitCode: exitOK, Updated: []string{"web"}})
+	notifier.SendStage(stageLive, "shop", []string{"shop.example.com"}, StageVersions{Incoming: "9f4be0a"})
 
 	if contentType != "application/json" {
 		t.Errorf("content type = %q", contentType)
 	}
-	if title, _ := decodeEmbed(t, got)["title"].(string); !strings.Contains(title, "shop") {
+	if title, _ := decodeEmbed(t, got)["title"].(string); title != "update live" {
 		t.Errorf("the webhook received %q", title)
 	}
 }
@@ -200,11 +78,12 @@ func TestAWebhookThatFailsNeverAffectsTheDeploy(t *testing.T) {
 	defer rejecting.Close()
 
 	// a 500, a connection refused, and no notifier configured at all
-	(&Notifier{webhookURL: rejecting.URL, client: rejecting.Client()}).Send(DeployReport{ExitCode: exitOK})
-	(&Notifier{webhookURL: "http://127.0.0.1:1", client: &http.Client{Timeout: time.Second}}).Send(DeployReport{ExitCode: exitOK})
+	(&Notifier{webhookURL: rejecting.URL, client: rejecting.Client()}).SendStage(stageLive, "shop", nil, StageVersions{})
+	(&Notifier{webhookURL: "http://127.0.0.1:1", client: &http.Client{Timeout: time.Second}}).
+		SendStage(stageLive, "shop", nil, StageVersions{})
 
 	var absent *Notifier
-	absent.Send(DeployReport{ExitCode: exitOK})
+	absent.SendStage(stageLive, "shop", nil, StageVersions{})
 }
 
 func TestTheWebhookIsReadFromTheEnvironmentOrTheGitignoredSecretsFile(t *testing.T) {
@@ -320,38 +199,132 @@ func writeSecretFixture(t *testing.T, repository, line string) {
 	}
 }
 
-func mustPayload(t *testing.T, report DeployReport) []byte {
+// The channel is read by the people using the thing, so the wording is checked
+// here rather than left to whatever the code happens to say.
+func TestTheStageMessagesReadForSomebodyWhoDoesNotKnowWhatACommitIs(t *testing.T) {
+	versions := StageVersions{Previous: "abc1234", Incoming: "def5678"}
+
+	cases := []struct {
+		stage      DeployStage
+		wantTitle  string
+		wantBody   string
+		wantColour int
+		wantLine   string
+	}{
+		{stageReady, "new version ready", "lmc is built and healthy, but nothing has changed for you yet", 0x3498db, "abc1234 -> def5678"},
+		{stageSwitching, "switching over", "moving to the new version now, usually without any interruption", 0xf39c12, "abc1234 -> def5678"},
+		{stageLive, "update live", "the new version is up and answering", 0x2ecc71, "abc1234 -> def5678"},
+		// the one stage that ends up back where it started, so the arrow turns
+		{stageCancelled, "update cancelled", "something went wrong, so the previous version is back", 0xe74c3c, "abc1234 <- def5678"},
+	}
+
+	for _, testCase := range cases {
+		t.Run(testCase.wantTitle, func(t *testing.T) {
+			payload, err := StagePayload(testCase.stage, "lmc", []string{"lecternmc.com", "bot"}, versions)
+			if err != nil {
+				t.Fatalf("StagePayload: %v", err)
+			}
+
+			embed := decodeEmbed(t, payload)
+			if title, _ := embed["title"].(string); title != testCase.wantTitle {
+				t.Errorf("title = %q, want %q", title, testCase.wantTitle)
+			}
+			if body, _ := embed["description"].(string); body != testCase.wantBody {
+				t.Errorf("body = %q, want %q", body, testCase.wantBody)
+			}
+			if colour, _ := embed["color"].(float64); int(colour) != testCase.wantColour {
+				t.Errorf("colour = %#x, want %#x", int(colour), testCase.wantColour)
+			}
+
+			fields := fieldsOf(t, embed)
+			if fields["version"] != testCase.wantLine {
+				t.Errorf("version = %q, want %q", fields["version"], testCase.wantLine)
+			}
+			// hostnames, because somebody reading the channel knows the site by its
+			// domain and has never heard of the container behind it
+			if fields["affected"] != "lecternmc.com, bot" {
+				t.Errorf("affected = %q", fields["affected"])
+			}
+			for _, jargon := range []string{"commit", "container", "stateless", "cutover", "healthcheck"} {
+				body, _ := embed["description"].(string)
+				if strings.Contains(strings.ToLower(body), jargon) {
+					t.Errorf("the body says %q, which means nothing to somebody using the site", jargon)
+				}
+			}
+		})
+	}
+}
+
+// A first deploy has nothing to move away from, so an arrow would be pointing
+// away from nothing.
+func TestAFirstDeployNamesOneVersionRatherThanATransition(t *testing.T) {
+	fields := fieldsOf(t, decodeEmbed(t, mustStagePayload(t, stageLive, StageVersions{Incoming: "def5678"})))
+	if fields["version"] != "def5678" {
+		t.Errorf("version = %q, want just the one release", fields["version"])
+	}
+
+	// and redeploying what is already current is not a transition either
+	same := fieldsOf(t, decodeEmbed(t, mustStagePayload(t, stageLive, StageVersions{Previous: "def5678", Incoming: "def5678"})))
+	if same["version"] != "def5678" {
+		t.Errorf("version = %q, want just the one release", same["version"])
+	}
+}
+
+func TestAffectedNamesPrefersDomainsOverServiceNames(t *testing.T) {
+	hosted := func(domain string) Service {
+		return Service{Host: &Host{Domain: domain, Port: 3000}}
+	}
+
+	got := AffectedNames(map[string]Service{
+		"web":     hosted("lecternmc.com"),
+		"api":     hosted("api.lecternmc.com"),
+		"support": hosted("support.lecternmc.com"),
+		"bot":     {},
+	})
+
+	want := []string{"api.lecternmc.com", "bot", "lecternmc.com", "support.lecternmc.com"}
+	if !slices.Equal(got, want) {
+		t.Errorf("AffectedNames = %v, want %v", got, want)
+	}
+}
+
+func mustStagePayload(t *testing.T, stage DeployStage, versions StageVersions) []byte {
 	t.Helper()
 
-	payload, err := report.DiscordPayload()
+	payload, err := StagePayload(stage, "lmc", nil, versions)
 	if err != nil {
-		t.Fatalf("DiscordPayload: %v", err)
+		t.Fatalf("StagePayload: %v", err)
 	}
 
 	return payload
 }
 
-// End to end, because everything above tests the notifier in isolation and the
-// question that actually matters is whether a real deploy sends the right thing
-// and, more importantly, whether a webhook having a bad day can break a release.
-func TestARealDeployNotifiesAndABrokenWebhookCannotFailIt(t *testing.T) {
+// End to end, because everything above tests the wording and none of it proves
+// RunDeploy says the right things at the right moments, which is the part that
+// actually reaches anybody.
+func TestARealDeploySendsTheArcInOrderAndSaysNothingBeforeThereIsAnythingToSay(t *testing.T) {
 	dockerAvailable(t)
 
-	const variable = "DEPLOY_TEST_E2E_WEBHOOK"
+	const variable = "DEPLOY_TEST_ARC_WEBHOOK"
 
-	received := make(chan []byte, 4)
+	received := make(chan map[string]any, 16)
 	webhook := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		body, _ := io.ReadAll(request.Body)
-		received <- body
+		var message struct {
+			Embeds []map[string]any `json:"embeds"`
+		}
+		json.Unmarshal(body, &message)
+		received <- message.Embeds[0]
 		writer.WriteHeader(http.StatusNoContent)
 	}))
 	defer webhook.Close()
+	t.Setenv(variable, webhook.URL)
 
 	repository := newRepository(t)
 	writeFile(t, repository, configFileName, `{
       "version": 1,
-      "id": "dd000015",
-      "name": "notified",
+      "id": "dd000017",
+      "name": "arc",
       "notify": {"discordWebhookFrom": "`+variable+`"},
       "services": {
         "app": {
@@ -362,143 +335,162 @@ func TestARealDeployNotifiesAndABrokenWebhookCannotFailIt(t *testing.T) {
         }
       }
     }`)
-	commit := commitFile(t, repository, "one.txt", "x")
 
 	destination := t.TempDir()
-	t.Cleanup(func() {
-		exec.Command("docker", "compose", "--project-name", ProjectName("dd000015", commit), "down").Run()
-		exec.Command("docker", "network", "rm", NetworkName("dd000015")).Run()
-	})
+	t.Cleanup(func() { exec.Command("docker", "network", "rm", NetworkName("dd000017")).Run() })
 
 	options := DeployOptions{
 		Context: repository, Destination: destination, Environment: defaultEnvironmentName,
 	}
 
-	t.Setenv(variable, webhook.URL)
+	// nothing to move away from yet, so the arc is ready then live
+	first := commitFile(t, repository, "one.txt", "first")
+	t.Cleanup(func() {
+		exec.Command("docker", "compose", "--project-name", ProjectName("dd000017", first), "down").Run()
+	})
 	if _, err := RunDeploy(options); err != nil {
-		t.Fatalf("the deploy should succeed: %v", err)
+		t.Fatalf("the first deploy should succeed: %v", err)
+	}
+
+	titlesOf(t, received, []string{"new version ready", "update live"})
+
+	// a second deploy has something to switch away from, so all three fire
+	second := commitFile(t, repository, "one.txt", "second")
+	t.Cleanup(func() {
+		exec.Command("docker", "compose", "--project-name", ProjectName("dd000017", second), "down").Run()
+	})
+	if _, err := RunDeploy(options); err != nil {
+		t.Fatalf("the second deploy should succeed: %v", err)
+	}
+
+	arc := titlesOf(t, received, []string{"new version ready", "switching over", "update live"})
+	wantLine := ShortCommit(first) + " -> " + ShortCommit(second)
+	for _, embed := range arc {
+		if version := fieldsOf(t, embed)["version"]; version != wantLine {
+			t.Errorf("version = %q, want %q", version, wantLine)
+		}
+	}
+
+	// a dirty tree never reaches a build, and is nobody's business but the
+	// operator's, so the channel hears nothing at all
+	writeFile(t, repository, "one.txt", "uncommitted")
+	if _, err := RunDeploy(options); err == nil {
+		t.Fatal("a dirty tree should fail")
 	}
 
 	select {
-	case payload := <-received:
-		embed := decodeEmbed(t, payload)
-		if colour, _ := embed["color"].(float64); int(colour) != 0x2ecc71 {
-			t.Errorf("a successful deploy should notify green, got %#x", int(colour))
-		}
-		if title, _ := embed["title"].(string); !strings.Contains(title, "notified") {
-			t.Errorf("the notification should name the project, got %q", title)
-		}
-		if fields := fieldsOf(t, embed); fields["Services updated"] != "app" {
-			t.Errorf("services updated = %q, want app", fields["Services updated"])
-		}
-	case <-time.After(15 * time.Second):
-		t.Fatal("a successful deploy sent no notification")
-	}
-
-	// now point it at something that cannot possibly answer, and redeploy. the
-	// release still has to go out, because a notification is a report about a
-	// deploy and never part of one
-	t.Setenv(variable, "http://127.0.0.1:1/api/webhooks/nothing")
-	second := commitFile(t, repository, "one.txt", "y")
-	t.Cleanup(func() {
-		exec.Command("docker", "compose", "--project-name", ProjectName("dd000015", second), "down").Run()
-	})
-
-	exitCode, err := RunDeploy(options)
-	if err != nil {
-		t.Fatalf("a dead webhook must not fail a deploy: %v", err)
-	}
-	if exitCode != exitOK {
-		t.Errorf("exit code = %d, want %d, a dead webhook is not a failed release", exitCode, exitOK)
-	}
-
-	state, err := ReadState(LocalRunner{}, NewLayout(destination, "dd000015"))
-	if err != nil {
-		t.Fatalf("ReadState: %v", err)
-	}
-	if state.Current != ShortCommit(second) {
-		t.Errorf("current = %q, want the release that went out anyway %q", state.Current, ShortCommit(second))
+	case embed := <-received:
+		t.Errorf("a failure before any build told users %q", embed["title"])
+	case <-time.After(2 * time.Second):
 	}
 }
 
-func TestARollbackNotificationSaysWhereItCameFromAndWhereItLanded(t *testing.T) {
-	report := DeployReport{
-		Action: actionRollback, Project: "shop", Commit: "9f4be0a", From: "c0ffee1",
-		Environment: "production", Updated: []string{"web"}, ExitCode: exitOK,
+// titlesOf drains exactly the expected number of notifications and checks their
+// order, since the order is the message.
+func titlesOf(t *testing.T, received chan map[string]any, want []string) []map[string]any {
+	t.Helper()
+
+	var got []string
+	var embeds []map[string]any
+
+	for range want {
+		select {
+		case embed := <-received:
+			title, _ := embed["title"].(string)
+			got = append(got, title)
+			embeds = append(embeds, embed)
+		case <-time.After(20 * time.Second):
+			t.Fatalf("expected %v, only got %v", want, got)
+		}
 	}
 
-	embed := decodeEmbed(t, mustPayload(t, report))
-	title, _ := embed["title"].(string)
-	if !strings.Contains(title, "Rolled") || !strings.Contains(title, "9f4be0a") {
-		t.Errorf("the title should say it rolled back and where to, got %q", title)
-	}
-	// a rollback is defined by the pair, so the release it left has to be there
-	if fields := fieldsOf(t, embed); fields["Rolled back from"] != "c0ffee1" {
-		t.Errorf("rolled back from = %q, want c0ffee1", fields["Rolled back from"])
+	if !slices.Equal(got, want) {
+		t.Errorf("the arc was %v, want %v", got, want)
 	}
 
-	failed := DeployReport{
-		Action: actionRollback, Project: "shop", Commit: "9f4be0a",
-		ExitCode: exitDeployFailed, Failure: errors.New("target release is gone"),
-	}
-	if title, _ := decodeEmbed(t, mustPayload(t, failed))["title"].(string); !strings.Contains(title, "Rollback failed") {
-		t.Errorf("a failed rollback should say so rather than blaming a deploy, got %q", title)
-	}
+	return embeds
 }
 
-// A destroy that took the volumes and one that did not are different events, and
-// only one of them is recoverable.
-func TestADestroyNotificationDistinguishesDataKeptFromDataGone(t *testing.T) {
-	kept := DeployReport{
-		Action: actionDestroy, Project: "shop", Environment: "production",
-		Updated: []string{"pg", "web"}, ExitCode: exitOK,
-	}
-	keptEmbed := decodeEmbed(t, mustPayload(t, kept))
-	if title, _ := keptEmbed["title"].(string); !strings.Contains(title, "data kept") {
-		t.Errorf("a destroy that kept the volumes should say so, got %q", title)
-	}
-	keptFields := fieldsOf(t, keptEmbed)
-	if !strings.Contains(keptFields["Volumes"], "kept") {
-		t.Errorf("volumes = %q", keptFields["Volumes"])
-	}
-	if keptFields["Services removed"] != "pg, web" {
-		t.Errorf("a destroy removes services rather than updating them, got %q", keptFields["Services removed"])
-	}
+func TestTheRollbackAndDowntimeMessages(t *testing.T) {
+	// a rollback lands on the earlier release, so the arrow turns the same way
+	// the cancelled one does
+	rollingBack := decodeEmbed(t, mustStage(t, stageRollingBack, "lmc",
+		StageVersions{Previous: "abc1234", Incoming: "def5678"}))
 
-	gone := DeployReport{
-		Action: actionDestroy, Project: "shop", VolumesRemoved: true, ExitCode: exitOK,
-	}
-	goneEmbed := decodeEmbed(t, mustPayload(t, gone))
-	if title, _ := goneEmbed["title"].(string); !strings.Contains(title, "and its data") {
-		t.Errorf("a destroy that removed the volumes must say so, got %q", title)
-	}
-	if volumes := fieldsOf(t, goneEmbed)["Volumes"]; !strings.Contains(volumes, "gone") {
-		t.Errorf("volumes = %q, want it to say the data is gone", volumes)
-	}
-}
-
-// A report with no action filled in still has to produce a sentence, since that
-// is what every existing deploy caller looked like before rollback and destroy
-// were wired up.
-func TestAReportWithNoActionReadsAsADeploy(t *testing.T) {
-	embed := decodeEmbed(t, mustPayload(t, DeployReport{Project: "shop", Commit: "9f4be0a", ExitCode: exitOK}))
-	if title, _ := embed["title"].(string); !strings.HasPrefix(title, "Deployed") {
+	if title, _ := rollingBack["title"].(string); title != "rolling back" {
 		t.Errorf("title = %q", title)
 	}
+	if body, _ := rollingBack["description"].(string); body != "we are going back to an earlier version, usually without any interruption" {
+		t.Errorf("body = %q", body)
+	}
+	if colour, _ := rollingBack["color"].(float64); int(colour) != 0xf39c12 {
+		t.Errorf("colour = %#x, want amber", int(colour))
+	}
+	if version := fieldsOf(t, rollingBack)["version"]; version != "abc1234 <- def5678" {
+		t.Errorf("version = %q, want the arrow pointing at the release being returned to", version)
+	}
+
+	// a rollback that never moved anything says so, and names the release still
+	// serving rather than an arrow for a move that did not happen
+	failed := decodeEmbed(t, mustStage(t, stageRollbackFailed, "lmc", StageVersions{Incoming: "def5678"}))
+	if title, _ := failed["title"].(string); title != "rollback failed" {
+		t.Errorf("title = %q", title)
+	}
+	if body, _ := failed["description"].(string); body != "the earlier version could not be started, so nothing changed" {
+		t.Errorf("body = %q", body)
+	}
+	if version := fieldsOf(t, failed)["version"]; version != "def5678" {
+		t.Errorf("version = %q, want the release still serving with no arrow", version)
+	}
+
+	// downtime says the one thing worth saying and nothing about volumes, since
+	// what happened to the data is not the channel's business
+	downtime := decodeEmbed(t, mustStage(t, stageDowntime, "lmc", StageVersions{}))
+	if title, _ := downtime["title"].(string); title != "lmc is experiencing downtime" {
+		t.Errorf("title = %q", title)
+	}
+	if body, present := downtime["description"]; present {
+		t.Errorf("downtime should carry no body, got %q", body)
+	}
+	for _, unwanted := range []string{"version", "Volumes"} {
+		if _, present := fieldsOf(t, downtime)[unwanted]; present {
+			t.Errorf("a downtime notice should not carry a %s field", unwanted)
+		}
+	}
+	for _, leak := range []string{"data", "volume", "destroy"} {
+		title, _ := downtime["title"].(string)
+		if strings.Contains(strings.ToLower(title), leak) {
+			t.Errorf("the downtime title says %q, which is not the channel's business", leak)
+		}
+	}
 }
 
-// End to end for the two commands that were not wired up before, because the
-// payload tests above would all still pass if RunRollback and RunDestroy simply
-// never called the notifier.
-func TestARealRollbackAndDestroyBothNotify(t *testing.T) {
+func mustStage(t *testing.T, stage DeployStage, projectName string, versions StageVersions) []byte {
+	t.Helper()
+
+	payload, err := StagePayload(stage, projectName, []string{"lecternmc.com"}, versions)
+	if err != nil {
+		t.Fatalf("StagePayload: %v", err)
+	}
+
+	return payload
+}
+
+// Rollback and destroy change what people are looking at just as much as a
+// deploy does, so they get told, in the same voice.
+func TestARealRollbackAndDestroyBothSpeakToUsers(t *testing.T) {
 	dockerAvailable(t)
 
 	const variable = "DEPLOY_TEST_LIFECYCLE_WEBHOOK"
 
-	received := make(chan []byte, 8)
+	received := make(chan map[string]any, 16)
 	webhook := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		body, _ := io.ReadAll(request.Body)
-		received <- body
+		var message struct {
+			Embeds []map[string]any `json:"embeds"`
+		}
+		json.Unmarshal(body, &message)
+		received <- message.Embeds[0]
 		writer.WriteHeader(http.StatusNoContent)
 	}))
 	defer webhook.Close()
@@ -507,7 +499,7 @@ func TestARealRollbackAndDestroyBothNotify(t *testing.T) {
 	repository := newRepository(t)
 	writeFile(t, repository, configFileName, `{
       "version": 1,
-      "id": "dd000016",
+      "id": "dd000018",
       "name": "lifecycle",
       "notify": {"discordWebhookFrom": "`+variable+`"},
       "services": {
@@ -521,74 +513,43 @@ func TestARealRollbackAndDestroyBothNotify(t *testing.T) {
     }`)
 
 	destination := t.TempDir()
-	t.Cleanup(func() { exec.Command("docker", "network", "rm", NetworkName("dd000016")).Run() })
+	t.Cleanup(func() { exec.Command("docker", "network", "rm", NetworkName("dd000018")).Run() })
 
 	options := DeployOptions{
 		Context: repository, Destination: destination, Environment: defaultEnvironmentName,
 	}
 
-	// two deploys so there is something to roll back to. committing moves HEAD,
-	// so deploying after each one needs no checkout
-	var second string
-	for _, contents := range []string{"first", "second"} {
-		commit := commitFile(t, repository, "one.txt", contents)
-		t.Cleanup(func() {
-			exec.Command("docker", "compose", "--project-name", ProjectName("dd000016", commit), "down").Run()
-		})
-		second = commit
-
-		if _, err := RunDeploy(options); err != nil {
-			t.Fatalf("deploying %s: %v", ShortCommit(commit), err)
-		}
-		drain(t, received, "deploy")
+	first := commitFile(t, repository, "one.txt", "first")
+	t.Cleanup(func() {
+		exec.Command("docker", "compose", "--project-name", ProjectName("dd000018", first), "down").Run()
+	})
+	if _, err := RunDeploy(options); err != nil {
+		t.Fatalf("first deploy: %v", err)
 	}
+	titlesOf(t, received, []string{"new version ready", "update live"})
+
+	second := commitFile(t, repository, "one.txt", "second")
+	t.Cleanup(func() {
+		exec.Command("docker", "compose", "--project-name", ProjectName("dd000018", second), "down").Run()
+	})
+	if _, err := RunDeploy(options); err != nil {
+		t.Fatalf("second deploy: %v", err)
+	}
+	titlesOf(t, received, []string{"new version ready", "switching over", "update live"})
 
 	if _, err := RunRollback(options, ""); err != nil {
 		t.Fatalf("the rollback should succeed: %v", err)
 	}
 
-	embed := awaitNotification(t, received, "rollback")
-	title, _ := embed["title"].(string)
-	if !strings.Contains(title, "Rolled") {
-		t.Errorf("a rollback should notify as a rollback, got %q", title)
-	}
-	if fields := fieldsOf(t, embed); fields["Rolled back from"] != ShortCommit(second) {
-		t.Errorf("rolled back from = %q, want %q", fields["Rolled back from"], ShortCommit(second))
+	rolled := titlesOf(t, received, []string{"rolling back"})
+	wantLine := ShortCommit(first) + " <- " + ShortCommit(second)
+	if version := fieldsOf(t, rolled[0])["version"]; version != wantLine {
+		t.Errorf("version = %q, want %q", version, wantLine)
 	}
 
 	if _, err := RunDestroy(options, false, strings.NewReader("lifecycle\n")); err != nil {
 		t.Fatalf("the destroy should succeed: %v", err)
 	}
 
-	destroyed := awaitNotification(t, received, "destroy")
-	if title, _ := destroyed["title"].(string); !strings.Contains(title, "Destroyed") {
-		t.Errorf("a destroy should notify as a destroy, got %q", title)
-	}
-	// this destroy kept the volumes, and saying otherwise would be alarming
-	if volumes := fieldsOf(t, destroyed)["Volumes"]; !strings.Contains(volumes, "kept") {
-		t.Errorf("volumes = %q, want it to say the data was kept", volumes)
-	}
-}
-
-func awaitNotification(t *testing.T, received chan []byte, what string) map[string]any {
-	t.Helper()
-
-	select {
-	case payload := <-received:
-		return decodeEmbed(t, payload)
-	case <-time.After(15 * time.Second):
-		t.Fatalf("the %s sent no notification", what)
-
-		return nil
-	}
-}
-
-func drain(t *testing.T, received chan []byte, what string) {
-	t.Helper()
-
-	select {
-	case <-received:
-	case <-time.After(15 * time.Second):
-		t.Fatalf("the %s sent no notification", what)
-	}
+	titlesOf(t, received, []string{"lifecycle is experiencing downtime"})
 }

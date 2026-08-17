@@ -78,6 +78,10 @@ func Cutover(
 	resolved ResolvedProject,
 	layout Layout,
 	superseded, commit string,
+	notifier *Notifier,
+	projectName string,
+	affected []string,
+	versions StageVersions,
 ) error {
 	if superseded == "" || superseded == ShortCommit(commit) {
 		return nil
@@ -87,8 +91,15 @@ func Cutover(
 	supersededCompose := path.Join(layout.Release(superseded), composeFileName)
 	supersededProject := ProjectName(resolved.ID, superseded)
 
+	// announced once here rather than separately down each path below, so there
+	// is one line to get right and one line to test. a project with no public
+	// hostname still has people using it, a bot being the obvious one
+	notifier.SendStage(stageSwitching, projectName, affected, versions)
+
 	// nothing is exposed, so there is no tunnel to verify through and the release
-	// that was serving is simply replaced
+	// that was serving is simply replaced. the switch still happens though, and a
+	// project with no public hostname still has people using it, a bot being the
+	// obvious one, so it is still announced
 	if len(hosted) == 0 {
 		stopRelease(runner, resolved.ID, superseded, supersededCompose)
 		fmt.Printf("  stopped %s, which this release replaces\n", supersededProject)

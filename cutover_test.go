@@ -162,7 +162,7 @@ func TestCutoverOrdersItsStepsCorrectly(t *testing.T) {
 
 	// the public check will fail here, since there is no tunnel in a unit test.
 	// that is fine, because what this asserts is the order of what came before
-	_ = Cutover(runner, resolved, layout, "aaaaaaa", "bbbbbbb")
+	_ = Cutover(runner, resolved, layout, "aaaaaaa", "bbbbbbb", nil, "", nil, StageVersions{})
 
 	if len(runner.steps) < 2 {
 		t.Fatalf("expected at least a probe and a stop, got %v", runner.steps)
@@ -200,7 +200,7 @@ func TestAFailedPublicVerificationStartsTheOldReleaseAgain(t *testing.T) {
 	resolved := loadAndResolve(t, hostedConfig, defaultEnvironmentName)
 	runner := newRecordingRunner()
 
-	err := Cutover(runner, resolved, NewLayout("/srv/projects", "a3f19c02"), "aaaaaaa", "bbbbbbb")
+	err := Cutover(runner, resolved, NewLayout("/srv/projects", "a3f19c02"), "aaaaaaa", "bbbbbbb", nil, "", nil, StageVersions{})
 	if err == nil {
 		t.Fatal("a hostname that never answers must fail the deploy")
 	}
@@ -244,7 +244,7 @@ func TestAProjectWithNoHostBlockNeedsNoTunnelAndNoVerification(t *testing.T) {
 	}
 
 	runner := newRecordingRunner()
-	if err := Cutover(runner, resolved, layout, "aaaaaaa", "bbbbbbb"); err != nil {
+	if err := Cutover(runner, resolved, layout, "aaaaaaa", "bbbbbbb", nil, "", nil, StageVersions{}); err != nil {
 		t.Fatalf("an unexposed project cuts over by simply replacing the old release: %v", err)
 	}
 
@@ -260,7 +260,7 @@ func TestRedeployingTheSameCommitIsNotACutover(t *testing.T) {
 	resolved := loadAndResolve(t, hostedConfig, defaultEnvironmentName)
 	runner := newRecordingRunner()
 
-	if err := Cutover(runner, resolved, NewLayout("/srv/projects", "a3f19c02"), "aaaaaaa", "aaaaaaa"); err != nil {
+	if err := Cutover(runner, resolved, NewLayout("/srv/projects", "a3f19c02"), "aaaaaaa", "aaaaaaa", nil, "", nil, StageVersions{}); err != nil {
 		t.Fatalf("redeploying the current release is not a cutover: %v", err)
 	}
 	if len(runner.steps) != 0 {

@@ -135,12 +135,8 @@ func ConfirmDestroy(plan DestroyPlan, in io.Reader, out io.Writer) error {
 
 func RunDestroy(options DeployOptions, removeVolumes bool, confirmation io.Reader) (exitCode int, err error) {
 	var notifier *Notifier
-	report := DeployReport{Action: actionDestroy, VolumesRemoved: removeVolumes}
-	defer func() {
-		report.ExitCode = exitCode
-		report.Failure = err
-		notifier.Send(report)
-	}()
+	var projectName string
+	var affected []string
 
 	resolved, layout, runner, closeRunner, destination, err := openProject(options)
 	if err != nil {
@@ -148,9 +144,9 @@ func RunDestroy(options DeployOptions, removeVolumes bool, confirmation io.Reade
 	}
 	defer closeRunner()
 
-	report.Project = resolved.Name
-	report.Environment = resolved.Environment
-	report.Updated = ServiceNames(resolved.Services)
+	projectName = resolved.Name
+	_, stateless := SplitServices(resolved.Services)
+	affected = AffectedNames(stateless)
 
 	// the repository is found again rather than threaded out of openProject,
 	// because five other commands share that signature and none of them notify
@@ -192,6 +188,10 @@ func RunDestroy(options DeployOptions, removeVolumes bool, confirmation io.Reade
 	if err := ExecuteDestroy(runner, layout, plan); err != nil {
 		return exitDeployFailed, err
 	}
+
+	// only once it is actually gone, and only that it is gone. whether the data
+	// went with it is the operator's business and not something to broadcast
+	notifier.SendStage(stageDowntime, projectName, affected, StageVersions{})
 
 	return exitOK, nil
 }

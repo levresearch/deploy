@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path"
+	"slices"
 	"strings"
 	"time"
 )
@@ -26,8 +27,9 @@ const notifyTimeout = 10 * time.Second
 // Discord's own limits. Going over any of them is a 400 with a body nobody
 // reads, so the payload is trimmed to fit rather than sent hopefully.
 const (
-	discordTitleLimit = 256
-	discordFieldLimit = 1024
+	discordTitleLimit       = 256
+	discordFieldLimit       = 1024
+	discordDescriptionLimit = 4096
 )
 
 // Notify is configured by the name of an environment variable rather than by the
@@ -38,170 +40,16 @@ type Notify struct {
 	DiscordWebhookFrom string `json:"discordWebhookFrom,omitempty"`
 }
 
-// deployAction is what the notification is about. Rollback and destroy change
-// what is serving just as much as a deploy does, and a channel that only hears
-// about deploys is a channel that misses the interesting half.
-type deployAction string
-
-const (
-	actionDeploy   deployAction = "Deploy"
-	actionRollback deployAction = "Rollback"
-	actionDestroy  deployAction = "Destroy"
-)
-
-// DeployReport is everything a notification says. It is filled in as the work
-// runs, so a failure halfway through still reports how far it got.
-type DeployReport struct {
-	Action      deployAction
-	Project     string
-	Commit      string
-	Environment string
-	// Updated is the stateless services this release replaced, which is what
-	// someone reading the channel actually wants to know.
-	Updated []string
-	// Recreated is the stateful services that took an outage because the shared
-	// stack changed. Almost always empty, and worth shouting about when it is not.
-	Recreated []string
-	// From is the release a rollback left behind, which is the thing anyone
-	// reading about a rollback wants to know as much as where it landed.
-	From string
-	// VolumesRemoved separates a destroy that kept the data from one that did
-	// not, since only one of those is recoverable.
-	VolumesRemoved bool
-	ExitCode       int
-	Failure        error
-}
-
-func (report DeployReport) succeeded() bool {
-	return report.Failure == nil && report.ExitCode == exitOK
-}
-
-// title says the outcome in the one line a phone notification shows.
-func (report DeployReport) title() string {
-	subject := strings.TrimSpace(report.Project + " " + report.Commit)
-
-	if !report.succeeded() {
-		if report.ExitCode == exitLiveButNeedsAHuman {
-			return fmt.Sprintf("%s is live but needs a human", subject)
-		}
-
-		return fmt.Sprintf("%s failed: %s", report.action(), subject)
-	}
-
-	switch report.Action {
-	case actionRollback:
-		return fmt.Sprintf("Rolled %s back to %s", report.Project, report.Commit)
-	case actionDestroy:
-		if report.VolumesRemoved {
-			return fmt.Sprintf("Destroyed %s and its data", report.Project)
-		}
-
-		return fmt.Sprintf("Destroyed %s, data kept", report.Project)
-	default:
-		return fmt.Sprintf("Deployed %s", subject)
-	}
-}
-
-// action defaults to a deploy, so a caller that fills in nothing else still
-// produces a sentence rather than a blank.
-func (report DeployReport) action() deployAction {
-	if report.Action == "" {
-		return actionDeploy
-	}
-
-	return report.Action
-}
-
-// colour is read at a glance, so the three outcomes are three colours rather
-// than green and red with the interesting one folded into either.
-func (report DeployReport) colour() int {
-	switch {
-	case report.succeeded():
-		return 0x2ecc71
-	case report.ExitCode == exitLiveButNeedsAHuman:
-		return 0xf39c12
-	default:
-		return 0xe74c3c
-	}
-}
-
-func (report DeployReport) services() string {
-	if len(report.Updated) == 0 {
-		return "none, this project is all stateful services"
-	}
-
-	return strings.Join(report.Updated, ", ")
-}
-
-// servicesLabel keeps the field honest. A failed deploy updated nothing, so
-// calling the same list "updated" would be a notification that lies.
-func (report DeployReport) servicesLabel() string {
-	if !report.succeeded() {
-		return "Services attempted"
-	}
-	if report.action() == actionDestroy {
-		return "Services removed"
-	}
-
-	return "Services updated"
-}
-
-// DiscordPayload is the request body, built without touching the network so the
-// interesting part can be tested without one.
-func (report DeployReport) DiscordPayload() ([]byte, error) {
-	fields := []discordField{
-		{Name: "Environment", Value: truncate(report.Environment, discordFieldLimit), Inline: true},
-	}
-
-	// a rollback is defined by the pair, so saying only where it landed leaves out
-	// half of what happened
-	if report.action() == actionRollback && report.From != "" {
-		fields = append(fields, discordField{Name: "Rolled back from", Value: report.From, Inline: true})
-	}
-	if report.action() == actionDestroy {
-		volumes := "kept, the data is still there"
-		if report.VolumesRemoved {
-			volumes = "REMOVED, the data is gone"
-		}
-		fields = append(fields, discordField{Name: "Volumes", Value: volumes})
-	}
-
-	fields = append(fields, discordField{
-		Name: report.servicesLabel(), Value: truncate(report.services(), discordFieldLimit),
-	})
-
-	if len(report.Recreated) > 0 {
-		fields = append(fields, discordField{
-			Name:  "Stateful services recreated",
-			Value: truncate(strings.Join(report.Recreated, ", "), discordFieldLimit),
-		})
-	}
-	if report.Failure != nil {
-		fields = append(fields, discordField{
-			Name:  "Error",
-			Value: truncate(report.Failure.Error(), discordFieldLimit),
-		})
-	}
-
-	return json.Marshal(discordMessage{
-		Embeds: []discordEmbed{{
-			Title:     truncate(report.title(), discordTitleLimit),
-			Color:     report.colour(),
-			Fields:    fields,
-			Timestamp: time.Now().UTC().Format(time.RFC3339),
-		}},
-	})
-}
-
 type discordMessage struct {
 	Embeds []discordEmbed `json:"embeds"`
 }
 
 type discordEmbed struct {
-	Title     string         `json:"title"`
-	Color     int            `json:"color"`
-	Fields    []discordField `json:"fields,omitempty"`
-	Timestamp string         `json:"timestamp"`
+	Title       string         `json:"title"`
+	Description string         `json:"description,omitempty"`
+	Color       int            `json:"color"`
+	Fields      []discordField `json:"fields,omitempty"`
+	Timestamp   string         `json:"timestamp"`
 }
 
 type discordField struct {
@@ -371,22 +219,7 @@ func ParseEnvFile(raw []byte) map[string]string {
 	return values
 }
 
-// Send reports the outcome and swallows its own failures on purpose. It is
-// called from a defer after the deploy has already decided what happened, and
-// there is no answer to "the notification failed" that helps anyone at that
-// point beyond saying so.
-func (notifier *Notifier) Send(report DeployReport) {
-	if notifier == nil {
-		return
-	}
-
-	payload, err := report.DiscordPayload()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "warning: could not build the discord notification: %v\n", err)
-
-		return
-	}
-
+func (notifier *Notifier) post(payload []byte) {
 	response, err := notifier.client.Post(notifier.webhookURL, "application/json", bytes.NewReader(payload))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "warning: could not notify discord: %v\n", err)
@@ -398,4 +231,170 @@ func (notifier *Notifier) Send(report DeployReport) {
 	if response.StatusCode >= 300 {
 		fmt.Fprintf(os.Stderr, "warning: discord rejected the notification with %s\n", response.Status)
 	}
+}
+
+// Everything below is addressed to the people using the thing being deployed,
+// not to whoever ran the command. That audience changes the rules. They have
+// never heard of a commit, they know the site by its hostname, and they only
+// care about one question, which is whether the thing is about to move under
+// them. So nothing is announced until there is a new version actually standing
+// up and healthy, and once something has been announced the arc always finishes,
+// either live or cancelled.
+
+type DeployStage int
+
+const (
+	stageReady DeployStage = iota
+	stageSwitching
+	stageLive
+	stageCancelled
+	stageRollingBack
+	stageRollbackFailed
+	stageDowntime
+)
+
+func (stage DeployStage) title(projectName string) string {
+	switch stage {
+	case stageSwitching:
+		return "switching over"
+	case stageLive:
+		return "update live"
+	case stageCancelled:
+		return "update cancelled"
+	case stageRollingBack:
+		return "rolling back"
+	case stageRollbackFailed:
+		return "rollback failed"
+	case stageDowntime:
+		return fmt.Sprintf("%s is experiencing downtime", projectName)
+	default:
+		return "new version ready"
+	}
+}
+
+func (stage DeployStage) body(projectName string) string {
+	switch stage {
+	case stageSwitching:
+		return "moving to the new version now, usually without any interruption"
+	case stageLive:
+		return "the new version is up and answering"
+	case stageCancelled:
+		return "something went wrong, so the previous version is back"
+	case stageRollingBack:
+		return "we are going back to an earlier version, usually without any interruption"
+	case stageRollbackFailed:
+		return "the earlier version could not be started, so nothing changed"
+	case stageDowntime:
+		// the title says it all, and a body here would only pad it
+		return ""
+	default:
+		return fmt.Sprintf("%s is built and healthy, but nothing has changed for you yet", projectName)
+	}
+}
+
+// colour runs blue, amber, green so the three good stages read as a progression
+// rather than as three unrelated messages.
+func (stage DeployStage) colour() int {
+	switch stage {
+	case stageSwitching:
+		return 0xf39c12
+	case stageLive:
+		return 0x2ecc71
+	case stageCancelled, stageRollbackFailed:
+		return 0xe74c3c
+	case stageRollingBack, stageDowntime:
+		return 0xf39c12
+	default:
+		return 0x3498db
+	}
+}
+
+// StageVersions is which releases a stage message is about. Previous is empty on
+// a first deploy, where there is nothing to move away from.
+type StageVersions struct {
+	Previous string
+	Incoming string
+}
+
+// versionLine points the arrow at whichever release is being ended up on, so a
+// deploy reads left to right and a revert reads right to left. Previous stays on
+// the left either way, so only the arrow has to be read to know the direction.
+func (versions StageVersions) versionLine(reverting bool) string {
+	if versions.Previous == "" || versions.Previous == versions.Incoming {
+		return versions.Incoming
+	}
+	if reverting {
+		return versions.Previous + " <- " + versions.Incoming
+	}
+
+	return versions.Previous + " -> " + versions.Incoming
+}
+
+// StagePayload is built without touching the network, the same as the operator
+// facing one, so the wording can be tested without a webhook.
+func StagePayload(stage DeployStage, projectName string, affected []string, versions StageVersions) ([]byte, error) {
+	fields := []discordField{}
+
+	// cancelled and rolling back both end up on the earlier release, so they are
+	// the stages whose arrow points the other way
+	reverting := stage == stageCancelled || stage == stageRollingBack
+	if line := versions.versionLine(reverting); line != "" {
+		fields = append(fields, discordField{Name: "version", Value: truncate(line, discordFieldLimit), Inline: true})
+	}
+	if len(affected) > 0 {
+		fields = append(fields, discordField{
+			Name: "affected", Value: truncate(strings.Join(affected, ", "), discordFieldLimit),
+		})
+	}
+
+	embed := discordEmbed{
+		Title:     truncate(stage.title(projectName), discordTitleLimit),
+		Color:     stage.colour(),
+		Fields:    fields,
+		Timestamp: time.Now().UTC().Format(time.RFC3339),
+	}
+	if body := stage.body(projectName); body != "" {
+		embed.Description = truncate(body, discordDescriptionLimit)
+	}
+
+	return json.Marshal(discordMessage{Embeds: []discordEmbed{embed}})
+}
+
+// SendStage swallows its failures for the same reason Send does. A channel that
+// missed a message is not a reason to stop a release that is already moving.
+func (notifier *Notifier) SendStage(
+	stage DeployStage, projectName string, affected []string, versions StageVersions,
+) {
+	if notifier == nil {
+		return
+	}
+
+	payload, err := StagePayload(stage, projectName, affected, versions)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: could not build the %q notification: %v\n", stage.title(projectName), err)
+
+		return
+	}
+
+	notifier.post(payload)
+}
+
+// AffectedNames is what to call the services in a message to users. Somebody
+// reading the channel knows the site by its hostname and has never heard of the
+// container behind it, so anything with a host block is named by its domain and
+// everything else falls back to the service name.
+// Sorted by the label rather than by the service behind it, since a reader has
+// no idea that lecternmc.com is called web and would see the ordering as random.
+func AffectedNames(services map[string]Service) []string {
+	var affected []string
+	for name, service := range services {
+		if host := service.Host; host != nil && host.Domain != "" {
+			affected = append(affected, host.Domain)
+			continue
+		}
+		affected = append(affected, name)
+	}
+	slices.Sort(affected)
+
+	return affected
 }

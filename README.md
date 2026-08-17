@@ -204,9 +204,35 @@ a webhook url is a credential, anyone who has it can post in your channel, so it
 
 `.deploy/` is gitignored, and deploy re-adds that line every run, so the webhook stays out of your repo. it never reaches your server either, because `git archive` only ships tracked files. the shell wins over the file, which is what makes ci work without one.
 
-you get one message at the end of every deploy, green for a success, red for a failure with the error, amber for exit code 3 where it went live but something after that needs you. it says which services moved and calls out any stateful service that got recreated.
+this channel is for the people using your thing, not for you, so it says nothing until there's something true to tell them. a lock somebody else holds, a dirty tree, a build that fell over, none of that reaches them. you get three messages once a new version is actually standing up and healthy:
 
-rollback and destroy notify too, since they change what's serving just as much as a deploy does. a rollback says where it came from as well as where it landed, and a destroy says whether it took your volumes with it.
+```
+blue    new version ready     lmc is built and healthy, but nothing has changed for you yet
+orange  switching over        moving to the new version now, usually without any interruption
+green   update live           the new version is up and answering
+```
+
+and a fourth if it doesn't work out, so nobody's left sitting on a switching over message that never resolved:
+
+```
+red     update cancelled      something went wrong, so the previous version is back
+```
+
+each one carries a `version` field, `abc1234 -> def5678` going forward and `abc1234 <- def5678` when it reverts, so the arrow always points at whichever release you end up on. a first deploy has nothing to move away from so it just says `def5678`.
+
+they also carry an `affected` field naming hostnames rather than services, `lecternmc.com, api.lecternmc.com, bot`, because somebody reading the channel knows the site by its domain and has never heard of the container behind it.
+
+rollback and destroy talk to the same channel, since they change what people are looking at just as much as a deploy does:
+
+```
+orange  rolling back          we are going back to an earlier version, usually without any interruption
+red     rollback failed       the earlier version could not be started, so nothing changed
+orange  <project> is experiencing downtime
+```
+
+the rollback notice goes out as it happens rather than after, because the whole thing takes under a second and there's nothing useful to say twice. it only speaks again if it couldn't start the earlier version, in which case nothing changed and the message says so.
+
+destroy says the one thing your users need, which is that it's down. whether you kept the volumes is your business and doesn't go in the channel.
 
 if the webhook is down, your deploy still ships. a notification is a report about a deploy and never part of one.
 
