@@ -204,7 +204,7 @@ a webhook url is a credential, anyone who has it can post in your channel, so it
 
 `.deploy/` is gitignored, and deploy re-adds that line every run, so the webhook stays out of your repo. it never reaches your server either, because `git archive` only ships tracked files. the shell wins over the file, which is what makes ci work without one.
 
-this channel is for the people using your thing, not for you, so it says nothing until there's something true to tell them. a lock somebody else holds, a dirty tree, a build that fell over, none of that reaches them. it's one message, posted once a new version is actually standing up and healthy, and then rewritten as the release moves. everything slow happens before the first line, so three separate messages would just land on top of each other.
+this channel is for the people using your thing, not for you, so it says nothing until there's something true to tell them. a lock somebody else holds, a dirty tree, a build that fell over, none of that reaches them. it's one message, posted once the images are built and the databases are up, and then rewritten as the release moves. release tasks and container starts are the slow part and they come after, so the message is up while people are waiting rather than arriving all at once at the end.
 
 it starts blue:
 

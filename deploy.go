@@ -57,10 +57,11 @@ func (layout Layout) SharedComposeFile() string {
 
 func RunDeploy(options DeployOptions) (exitCode int, err error) {
 	// the channel is read by the people using this thing, not by whoever ran the
-	// command, so nothing is said until there is a healthy new version standing
-	// up. a lock somebody else holds, or a dirty tree, is not their business.
-	// once something has been said the arc always finishes, either live or
-	// cancelled, so nobody is left on a switching over message forever
+	// command, so nothing is said until the images are built and the new release
+	// is actually going up. a lock somebody else holds, a dirty tree, or a build
+	// that fell over is not their business. once something has been said the arc
+	// always finishes, either live or cancelled, so nobody is left on a staging
+	// message forever
 	var notifier *Notifier
 	var announced bool
 	var affected []string
@@ -214,6 +215,15 @@ func RunDeploy(options DeployOptions) (exitCode int, err error) {
 		return exitDeployFailed, err
 	}
 
+	// the images are built and the databases are up, so from here on the release
+	// is genuinely being staged and the wait is worth showing. migrations and
+	// container starts are the slow part, and a message that only appeared once
+	// they finished would land on top of the switch and say nothing
+	if len(stateless) > 0 {
+		notifier.SendStage(stageReady, projectName, affected, versions)
+		announced = true
+	}
+
 	if err := runReleaseTasks(runner, resolved, layout, releaseDirectory, commit); err != nil {
 		return exitDeployFailed, err
 	}
@@ -230,16 +240,11 @@ func RunDeploy(options DeployOptions) (exitCode int, err error) {
 	// a project can be nothing but databases, and compose refuses to bring up a
 	// file with no services in it. the release is still placed and recorded, so
 	// adding an app later is an ordinary deploy rather than a special case
-	if _, stateless := SplitServices(resolved.Services); len(stateless) > 0 {
+	if len(stateless) > 0 {
 		if err := startStack(runner, composeFile, ProjectName(resolved.ID, commit)); err != nil {
 			return exitDeployFailed, err
 		}
 		fmt.Printf("  %s is up\n", ProjectName(resolved.ID, commit))
-
-		// healthy, and standing beside whatever is still serving. this is the
-		// first moment there is anything true to tell anyone
-		notifier.SendStage(stageReady, projectName, affected, versions)
-		announced = true
 	} else {
 		fmt.Printf("  nothing to run per commit, this project is all stateful services\n")
 	}

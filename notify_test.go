@@ -636,6 +636,7 @@ func TestARealDeploySendsTheArcInOrderAndSaysNothingBeforeThereIsAnythingToSay(t
 type notification struct {
 	method string
 	embed  map[string]any
+	at     time.Time
 }
 
 // fakeDiscord answers the way Discord does, which means handing back the created
@@ -659,7 +660,7 @@ func fakeDiscord(t *testing.T) (chan notification, string) {
 			return
 		}
 
-		received <- notification{method: request.Method, embed: message.Embeds[0]}
+		received <- notification{method: request.Method, embed: message.Embeds[0], at: time.Now()}
 
 		writer.Header().Set("Content-Type", "application/json")
 		fmt.Fprint(writer, `{"id": "1417"}`)
@@ -771,6 +772,65 @@ func mustStage(t *testing.T, stage DeployStage, projectName string, versions Sta
 	}
 
 	return payload
+}
+
+// The staging line is the one that has to arrive early, because everything it
+// covers is slow. Announcing it once the new containers were already healthy
+// put it in the same second as the switch, which told nobody anything.
+func TestStagingIsAnnouncedBeforeTheSlowPartRatherThanAfterIt(t *testing.T) {
+	dockerAvailable(t)
+
+	const variable = "DEPLOY_TEST_STAGING_WEBHOOK"
+	const taskSeconds = 6
+
+	received, webhookURL := fakeDiscord(t)
+	t.Setenv(variable, webhookURL)
+
+	repository := newRepository(t)
+	writeFile(t, repository, configFileName, `{
+      "version": 1,
+      "id": "dd000019",
+      "name": "staging",
+      "notify": {"discordWebhookFrom": "`+variable+`"},
+      "services": {
+        "app": {
+          "image": "busybox:latest",
+          "stateful": false,
+          "command": ["sh", "-c", "sleep 300"],
+          "healthcheck": {"command": ["CMD", "true"], "interval": "1s", "retries": 5}
+        }
+      },
+      "release": {
+        "slow": {"image": "busybox:latest", "command": "sleep `+fmt.Sprint(taskSeconds)+`"}
+      }
+    }`)
+
+	destination := t.TempDir()
+	t.Cleanup(func() { exec.Command("docker", "network", "rm", NetworkName("dd000019")).Run() })
+
+	options := DeployOptions{
+		Context: repository, Destination: destination, Environment: defaultEnvironmentName,
+	}
+
+	commit := commitFile(t, repository, "one.txt", "first")
+	t.Cleanup(func() {
+		exec.Command("docker", "compose", "--project-name", ProjectName("dd000019", commit)).Run()
+	})
+	if _, err := RunDeploy(options); err != nil {
+		t.Fatalf("the deploy should succeed: %v", err)
+	}
+
+	// nothing to switch away from on a first deploy, so the arc is the two ends
+	arc := titlesOf(t, received, []string{"staging new deployment", "update live"})
+
+	// the release task alone accounts for most of this, so a gap this wide is only
+	// possible if the staging line went out before the task ran
+	if waited := arc[1].at.Sub(arc[0].at); waited < (taskSeconds-1)*time.Second {
+		t.Errorf(
+			"only %s passed between staging and live, so staging is landing after the slow part rather than before it",
+			waited,
+		)
+	}
 }
 
 // Rollback and destroy change what people are looking at just as much as a
