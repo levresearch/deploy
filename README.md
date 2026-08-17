@@ -204,25 +204,46 @@ a webhook url is a credential, anyone who has it can post in your channel, so it
 
 `.deploy/` is gitignored, and deploy re-adds that line every run, so the webhook stays out of your repo. it never reaches your server either, because `git archive` only ships tracked files. the shell wins over the file, which is what makes ci work without one.
 
-this channel is for the people using your thing, not for you, so it says nothing until there's something true to tell them. a lock somebody else holds, a dirty tree, a build that fell over, none of that reaches them. you get three messages once a new version is actually standing up and healthy:
+this channel is for the people using your thing, not for you, so it says nothing until there's something true to tell them. a lock somebody else holds, a dirty tree, a build that fell over, none of that reaches them. it's one message, posted once a new version is actually standing up and healthy, and then rewritten as the release moves. everything slow happens before the first line, so three separate messages would just land on top of each other.
+
+it starts blue:
 
 ```
-blue    new version ready     lmc is built and healthy, but nothing has changed for you yet
-orange  switching over        moving to the new version now, usually without any interruption
-green   update live           the new version is up and answering
+staging new deployment
+14:05:09  there is a new version being staged
+
+version              affected
+abc1234 -> def5678   ```
+                     lecternmc.com
+                     bot
+                     ```
 ```
 
-and a fourth if it doesn't work out, so nobody's left sitting on a switching over message that never resolved:
+turns orange and gains a line when the switch starts, then green when it's done:
 
 ```
-red     update cancelled      something went wrong, so the previous version is back
+update live
+14:05:09  there is a new version being staged
+14:05:20  switching over to the new version now, usually without any interruption
+14:05:31  the new version is up and answering
 ```
 
-each one carries a `version` field, `abc1234 -> def5678` going forward and `abc1234 <- def5678` when it reverts, so the arrow always points at whichever release you end up on. a first deploy has nothing to move away from so it just says `def5678`.
+and red if it doesn't work out, so nobody's left sitting on a switching over line that never resolved:
 
-they also carry an `affected` field naming hostnames rather than services, `lecternmc.com, api.lecternmc.com, bot`, because somebody reading the channel knows the site by its domain and has never heard of the container behind it.
+```
+reverting changes
+14:05:09  there is a new version being staged
+14:05:20  switching over to the new version now, usually without any interruption
+14:05:24  we are reverting changes while we fix some issues with the deployment
+```
 
-rollback and destroy talk to the same channel, since they change what people are looking at just as much as a deploy does:
+nothing is ever taken away, so somebody who looks at the channel an hour later reads the whole release out of the one message. the title and the colour are always the state it's in now.
+
+the `version` field reads `abc1234 -> def5678` going forward and `abc1234 <- def5678` when it reverts, so the arrow always points at whichever release you end up on. a first deploy has nothing to move away from so it just says `def5678`.
+
+the `affected` field names hostnames rather than services, one per line, because somebody reading the channel knows the site by its domain and has never heard of the container behind it.
+
+rollback and destroy talk to the same channel, since they change what people are looking at just as much as a deploy does. each is its own message rather than a late edit of the deploy before it:
 
 ```
 orange  rolling back          we are going back to an earlier version, usually without any interruption

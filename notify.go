@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"net/http"
+	"net/url"
 	"os"
 	"path"
 	"slices"
@@ -75,9 +77,18 @@ func truncate(text string, limit int) string {
 // Notifier holds a resolved webhook. A nil one is the ordinary case of a project
 // that configured no notifications, and every method tolerates it, so callers
 // never have to ask whether notifications are on.
+//
+// messageID is the message the arc is being told in, and log is what it has said
+// so far. Everything worth saying happens after the build, so the stages land
+// within seconds of each other and three separate messages read as a wall of
+// noise arriving at once. One message that grows instead reads as the thing it
+// describes, which is a release moving through states, and somebody arriving
+// late still sees the whole of it.
 type Notifier struct {
 	webhookURL string
 	client     *http.Client
+	messageID  string
+	log        []string
 }
 
 // secretsFileName holds credentials deploy itself needs, as opposed to the env
@@ -92,6 +103,8 @@ const secretsFileName = "secrets.env"
 // a deploy.
 func NewNotifier(repositoryPath string, notify *Notify) (*Notifier, error) {
 	if notify == nil || notify.DiscordWebhookFrom == "" {
+		warnAboutStrandedWebhook(repositoryPath)
+
 		return nil, nil
 	}
 
@@ -110,6 +123,34 @@ func NewNotifier(repositoryPath string, notify *Notify) (*Notifier, error) {
 	}
 
 	return &Notifier{webhookURL: webhookURL, client: newNotifyClient()}, nil
+}
+
+// warnAboutStrandedWebhook covers the way notifications actually go missing,
+// which is not a bad url but a config that never names one. Deploying with a
+// webhook sitting in the secrets file and no notify block is silent and looks
+// exactly like a deploy where nobody wanted notifications, so it gets said out
+// loud. Rewriting the config out from under somebody is not the answer, because
+// leaving the block out on purpose is allowed.
+func warnAboutStrandedWebhook(repositoryPath string) {
+	secretsPath := path.Join(repositoryPath, deployDirectoryName, secretsFileName)
+
+	raw, err := os.ReadFile(secretsPath)
+	if err != nil {
+		return
+	}
+
+	for name, value := range ParseEnvFile(raw) {
+		if !strings.Contains(value, "/api/webhooks/") {
+			continue
+		}
+
+		fmt.Fprintf(os.Stderr,
+			"warning: %s holds %s, but %s names no webhook, so nothing is being notified. wire it up with: deploy dwh <webhook url>\n",
+			secretsPath, name, configFileName,
+		)
+
+		return
+	}
 }
 
 func newNotifyClient() *http.Client {
@@ -219,8 +260,28 @@ func ParseEnvFile(raw []byte) map[string]string {
 	return values
 }
 
+// post says the next thing, by editing what was already said if there is
+// anything, and by starting the message if there is not. An edit that does not
+// take is not worth failing over, so it falls back to a new message and the
+// worst case is the behaviour we used to have.
 func (notifier *Notifier) post(payload []byte) {
-	response, err := notifier.client.Post(notifier.webhookURL, "application/json", bytes.NewReader(payload))
+	if notifier.messageID != "" {
+		if notifier.edit(payload) {
+			return
+		}
+		notifier.messageID = ""
+	}
+
+	notifier.create(payload)
+}
+
+// create posts the message and remembers which one it is. Discord answers a
+// plain webhook post with 204 and no body, so wait=true is what turns the reply
+// into the message itself, which is the only way to learn the id to edit.
+func (notifier *Notifier) create(payload []byte) {
+	response, err := notifier.client.Post(
+		addQuery(notifier.webhookURL, "wait", "true"), "application/json", bytes.NewReader(payload),
+	)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "warning: could not notify discord: %v\n", err)
 
@@ -230,7 +291,78 @@ func (notifier *Notifier) post(payload []byte) {
 
 	if response.StatusCode >= 300 {
 		fmt.Fprintf(os.Stderr, "warning: discord rejected the notification with %s\n", response.Status)
+
+		return
 	}
+
+	// no id is not a failure, it just means the rest of the arc gets told in
+	// separate messages rather than in this one
+	var created struct {
+		ID string `json:"id"`
+	}
+	body, err := io.ReadAll(io.LimitReader(response.Body, createdMessageLimit))
+	if err != nil {
+		return
+	}
+	if err := json.Unmarshal(body, &created); err != nil {
+		return
+	}
+
+	notifier.messageID = created.ID
+}
+
+// edit reports whether the message was updated. A false means the message is
+// gone, deleted by somebody or lost to a webhook that was rotated underneath us,
+// and the caller starts a fresh one rather than going quiet.
+func (notifier *Notifier) edit(payload []byte) bool {
+	request, err := http.NewRequest(
+		http.MethodPatch, messageURL(notifier.webhookURL, notifier.messageID), bytes.NewReader(payload),
+	)
+	if err != nil {
+		return false
+	}
+	request.Header.Set("Content-Type", "application/json")
+
+	response, err := notifier.client.Do(request)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: could not notify discord: %v\n", err)
+
+		return false
+	}
+	defer response.Body.Close()
+
+	return response.StatusCode < 300
+}
+
+// createdMessageLimit is only ever read for an id, so the rest of what Discord
+// returns about a message is not worth holding.
+const createdMessageLimit = 1 << 16
+
+// addQuery and messageURL both leave any query the webhook already carries
+// alone, since a webhook posting into a thread carries thread_id and dropping it
+// would move the message to the parent channel.
+func addQuery(webhookURL, name, value string) string {
+	parsed, err := url.Parse(webhookURL)
+	if err != nil {
+		return webhookURL
+	}
+
+	query := parsed.Query()
+	query.Set(name, value)
+	parsed.RawQuery = query.Encode()
+
+	return parsed.String()
+}
+
+func messageURL(webhookURL, messageID string) string {
+	parsed, err := url.Parse(webhookURL)
+	if err != nil {
+		return webhookURL
+	}
+
+	parsed.Path = strings.TrimSuffix(parsed.Path, "/") + "/messages/" + messageID
+
+	return parsed.String()
 }
 
 // Everything below is addressed to the people using the thing being deployed,
@@ -260,7 +392,7 @@ func (stage DeployStage) title(projectName string) string {
 	case stageLive:
 		return "update live"
 	case stageCancelled:
-		return "update cancelled"
+		return "reverting changes"
 	case stageRollingBack:
 		return "rolling back"
 	case stageRollbackFailed:
@@ -268,27 +400,30 @@ func (stage DeployStage) title(projectName string) string {
 	case stageDowntime:
 		return fmt.Sprintf("%s is experiencing downtime", projectName)
 	default:
-		return "new version ready"
+		return "staging new deployment"
 	}
 }
 
-func (stage DeployStage) body(projectName string) string {
+// line is what this stage adds to the log, rather than what the message says as
+// a whole. Each one has to read as an event at a moment, since it lands under
+// everything that came before it and stays there.
+func (stage DeployStage) line() string {
 	switch stage {
 	case stageSwitching:
-		return "moving to the new version now, usually without any interruption"
+		return "switching over to the new version now, usually without any interruption"
 	case stageLive:
 		return "the new version is up and answering"
 	case stageCancelled:
-		return "something went wrong, so the previous version is back"
+		return "we are reverting changes while we fix some issues with the deployment"
 	case stageRollingBack:
 		return "we are going back to an earlier version, usually without any interruption"
 	case stageRollbackFailed:
 		return "the earlier version could not be started, so nothing changed"
 	case stageDowntime:
-		// the title says it all, and a body here would only pad it
+		// the title says it all, and a line here would only repeat it
 		return ""
 	default:
-		return fmt.Sprintf("%s is built and healthy, but nothing has changed for you yet", projectName)
+		return "there is a new version being staged"
 	}
 }
 
@@ -330,9 +465,29 @@ func (versions StageVersions) versionLine(reverting bool) string {
 	return versions.Previous + " -> " + versions.Incoming
 }
 
-// StagePayload is built without touching the network, the same as the operator
-// facing one, so the wording can be tested without a webhook.
-func StagePayload(stage DeployStage, projectName string, affected []string, versions StageVersions) ([]byte, error) {
+// clockFormat is local to whoever ran the deploy, which for a project with one
+// operator is the only clock anybody involved is reading. The seconds are there
+// because the stages land within a few of each other and a log where three lines
+// share a minute says nothing about the order.
+const clockFormat = "15:04:05"
+
+// appendLine grows the log rather than replacing it, so the message ends up
+// being the whole story of the release instead of only its last moment.
+func appendLine(log []string, stage DeployStage, at time.Time) []string {
+	line := stage.line()
+	if line == "" {
+		return log
+	}
+
+	return append(log, at.Format(clockFormat)+"  "+line)
+}
+
+// StagePayload is built without touching the network, so the wording can be
+// tested without a webhook. The log is every line so far including this stage's,
+// because the description is rewritten in full on every edit.
+func StagePayload(
+	stage DeployStage, log []string, projectName string, affected []string, versions StageVersions,
+) ([]byte, error) {
 	fields := []discordField{}
 
 	// cancelled and rolling back both end up on the earlier release, so they are
@@ -342,8 +497,12 @@ func StagePayload(stage DeployStage, projectName string, affected []string, vers
 		fields = append(fields, discordField{Name: "version", Value: truncate(line, discordFieldLimit), Inline: true})
 	}
 	if len(affected) > 0 {
+		// a code block one name per line, because a comma separated run of
+		// hostnames wraps into an unreadable paragraph once there are a few
 		fields = append(fields, discordField{
-			Name: "affected", Value: truncate(strings.Join(affected, ", "), discordFieldLimit),
+			Name:   "affected",
+			Value:  truncate("```\n"+strings.Join(affected, "\n")+"\n```", discordFieldLimit),
+			Inline: true,
 		})
 	}
 
@@ -353,7 +512,7 @@ func StagePayload(stage DeployStage, projectName string, affected []string, vers
 		Fields:    fields,
 		Timestamp: time.Now().UTC().Format(time.RFC3339),
 	}
-	if body := stage.body(projectName); body != "" {
+	if body := strings.Join(log, "\n"); body != "" {
 		embed.Description = truncate(body, discordDescriptionLimit)
 	}
 
@@ -369,7 +528,9 @@ func (notifier *Notifier) SendStage(
 		return
 	}
 
-	payload, err := StagePayload(stage, projectName, affected, versions)
+	notifier.log = appendLine(notifier.log, stage, time.Now())
+
+	payload, err := StagePayload(stage, notifier.log, projectName, affected, versions)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "warning: could not build the %q notification: %v\n", stage.title(projectName), err)
 

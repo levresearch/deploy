@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -67,6 +68,142 @@ func TestTheNotifierPostsToTheWebhook(t *testing.T) {
 	if title, _ := decodeEmbed(t, got)["title"].(string); title != "update live" {
 		t.Errorf("the webhook received %q", title)
 	}
+}
+
+// The stages all land within seconds of each other, because everything slow
+// happens before the first one, so the arc is one message that changes rather
+// than three that arrive together.
+func TestTheStagesEditOneMessageRatherThanPostingSeveral(t *testing.T) {
+	type call struct {
+		method string
+		path   string
+		query  string
+		title  string
+	}
+
+	var calls []call
+
+	discord := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		body, _ := io.ReadAll(request.Body)
+
+		var message struct {
+			Embeds []struct {
+				Title string `json:"title"`
+			} `json:"embeds"`
+		}
+		if err := json.Unmarshal(body, &message); err != nil || len(message.Embeds) != 1 {
+			t.Errorf("%s %s did not carry one embed: %v", request.Method, request.URL.Path, err)
+		}
+
+		calls = append(calls, call{
+			method: request.Method,
+			path:   request.URL.Path,
+			query:  request.URL.Query().Get("wait"),
+			title:  message.Embeds[0].Title,
+		})
+
+		writer.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(writer, `{"id": "1417"}`)
+	}))
+	defer discord.Close()
+
+	notifier := &Notifier{webhookURL: discord.URL + "/api/webhooks/1/abc", client: discord.Client()}
+	versions := StageVersions{Previous: "abc1234", Incoming: "def5678"}
+	for _, stage := range []DeployStage{stageReady, stageSwitching, stageLive} {
+		notifier.SendStage(stage, "shop", []string{"shop.example.com"}, versions)
+	}
+
+	if len(calls) != 3 {
+		t.Fatalf("expected three calls, got %d: %+v", len(calls), calls)
+	}
+
+	// the first one has to ask for the message back, since a plain webhook post
+	// answers 204 with no body and there is then no id to edit
+	if calls[0].method != http.MethodPost || calls[0].query != "true" {
+		t.Errorf("the first stage should post with wait=true, got %s %s?wait=%s",
+			calls[0].method, calls[0].path, calls[0].query)
+	}
+	for _, later := range calls[1:] {
+		if later.method != http.MethodPatch {
+			t.Errorf("later stages should edit, got %s %s", later.method, later.path)
+		}
+		if !strings.HasSuffix(later.path, "/messages/1417") {
+			t.Errorf("the edit should address the message that was created, got %s", later.path)
+		}
+	}
+
+	if titles := []string{calls[0].title, calls[1].title, calls[2].title}; !slices.Equal(
+		titles, []string{"staging new deployment", "switching over", "update live"},
+	) {
+		t.Errorf("the one message should move through the arc, got %q", titles)
+	}
+}
+
+// A webhook posting into a thread carries thread_id, and an edit that dropped it
+// would move the message to the parent channel.
+func TestEditingKeepsTheQueryTheWebhookCameWith(t *testing.T) {
+	const webhook = "https://discord.com/api/webhooks/1/abc?thread_id=99"
+
+	edit := messageURL(webhook, "1417")
+	if !strings.Contains(edit, "/api/webhooks/1/abc/messages/1417") {
+		t.Errorf("the edit url should address the message, got %s", edit)
+	}
+	if !strings.Contains(edit, "thread_id=99") {
+		t.Errorf("the edit url dropped the thread, got %s", edit)
+	}
+
+	created := addQuery(webhook, "wait", "true")
+	if !strings.Contains(created, "thread_id=99") || !strings.Contains(created, "wait=true") {
+		t.Errorf("the create url should keep the thread and ask to wait, got %s", created)
+	}
+}
+
+// Editing is the nice path, not a load bearing one, so anything that goes wrong
+// with it falls back to a separate message rather than to silence.
+func TestAMessageThatCannotBeEditedIsPostedAgain(t *testing.T) {
+	t.Run("when discord returns no id to edit", func(t *testing.T) {
+		var methods []string
+
+		discord := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+			methods = append(methods, request.Method)
+			writer.WriteHeader(http.StatusNoContent)
+		}))
+		defer discord.Close()
+
+		notifier := &Notifier{webhookURL: discord.URL, client: discord.Client()}
+		notifier.SendStage(stageReady, "shop", nil, StageVersions{})
+		notifier.SendStage(stageLive, "shop", nil, StageVersions{})
+
+		if !slices.Equal(methods, []string{http.MethodPost, http.MethodPost}) {
+			t.Errorf("with no id to edit both stages should post, got %v", methods)
+		}
+	})
+
+	t.Run("when the message it was told about is gone", func(t *testing.T) {
+		var methods []string
+
+		discord := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+			methods = append(methods, request.Method)
+
+			if request.Method == http.MethodPatch {
+				writer.WriteHeader(http.StatusNotFound)
+
+				return
+			}
+
+			writer.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(writer, `{"id": "1417"}`)
+		}))
+		defer discord.Close()
+
+		notifier := &Notifier{webhookURL: discord.URL, client: discord.Client()}
+		notifier.SendStage(stageReady, "shop", nil, StageVersions{})
+		notifier.SendStage(stageLive, "shop", nil, StageVersions{})
+
+		if !slices.Equal(methods, []string{http.MethodPost, http.MethodPatch, http.MethodPost}) {
+			t.Errorf("a deleted message should be replaced by a new one, got %v", methods)
+		}
+	})
 }
 
 // A webhook that is down is a webhook that is down, not a failed release. This
@@ -155,6 +292,49 @@ func TestTheWebhookIsReadFromTheEnvironmentOrTheGitignoredSecretsFile(t *testing
 			t.Errorf("a project without notifications should get none, got %v %v", notifier, err)
 		}
 	})
+
+	// how notifications actually go missing, which is a webhook that was saved and
+	// then lost its notify block to a later edit of the config. that deploys
+	// silently and looks the same as wanting no notifications at all
+	t.Run("a webhook with no notify block naming it is said out loud", func(t *testing.T) {
+		repository := t.TempDir()
+		writeSecretFixture(t, repository, variable+"="+webhook)
+
+		var notifier *Notifier
+		var err error
+		warning := captureStderr(t, func() {
+			notifier, err = NewNotifier(repository, nil)
+		})
+
+		if err != nil || notifier != nil {
+			t.Errorf("a stranded webhook is still not notifications, got %v %v", notifier, err)
+		}
+		if !strings.Contains(warning, variable) || !strings.Contains(warning, "deploy dwh") {
+			t.Errorf("the warning should name the variable and how to fix it, got: %q", warning)
+		}
+		// the whole point of naming a variable is that the url is not shown around,
+		// and a warning is no more allowed to print it than anything else is
+		if strings.Contains(warning, webhook) {
+			t.Errorf("the warning printed the webhook itself: %q", warning)
+		}
+	})
+
+	// leaving notifications off is allowed, so an ordinary secrets file holding
+	// something that is not a webhook has to stay quiet
+	t.Run("a secrets file with no webhook in it stays quiet", func(t *testing.T) {
+		repository := t.TempDir()
+		writeSecretFixture(t, repository, "SOME_TOKEN=not-a-webhook")
+
+		warning := captureStderr(t, func() {
+			if _, err := NewNotifier(repository, nil); err != nil {
+				t.Errorf("NewNotifier: %v", err)
+			}
+		})
+
+		if warning != "" {
+			t.Errorf("nothing to warn about here, got: %q", warning)
+		}
+	})
 }
 
 func TestParseEnvFile(t *testing.T) {
@@ -207,20 +387,30 @@ func TestTheStageMessagesReadForSomebodyWhoDoesNotKnowWhatACommitIs(t *testing.T
 	cases := []struct {
 		stage      DeployStage
 		wantTitle  string
-		wantBody   string
-		wantColour int
 		wantLine   string
+		wantColour int
+		wantVerion string
 	}{
-		{stageReady, "new version ready", "lmc is built and healthy, but nothing has changed for you yet", 0x3498db, "abc1234 -> def5678"},
-		{stageSwitching, "switching over", "moving to the new version now, usually without any interruption", 0xf39c12, "abc1234 -> def5678"},
+		{stageReady, "staging new deployment", "there is a new version being staged", 0x3498db, "abc1234 -> def5678"},
+		{
+			stageSwitching, "switching over",
+			"switching over to the new version now, usually without any interruption",
+			0xf39c12, "abc1234 -> def5678",
+		},
 		{stageLive, "update live", "the new version is up and answering", 0x2ecc71, "abc1234 -> def5678"},
 		// the one stage that ends up back where it started, so the arrow turns
-		{stageCancelled, "update cancelled", "something went wrong, so the previous version is back", 0xe74c3c, "abc1234 <- def5678"},
+		{
+			stageCancelled, "reverting changes",
+			"we are reverting changes while we fix some issues with the deployment",
+			0xe74c3c, "abc1234 <- def5678",
+		},
 	}
 
 	for _, testCase := range cases {
 		t.Run(testCase.wantTitle, func(t *testing.T) {
-			payload, err := StagePayload(testCase.stage, "lmc", []string{"lecternmc.com", "bot"}, versions)
+			log := appendLine(nil, testCase.stage, time.Date(2026, 8, 17, 14, 5, 9, 0, time.UTC))
+
+			payload, err := StagePayload(testCase.stage, log, "lmc", []string{"lecternmc.com", "bot"}, versions)
 			if err != nil {
 				t.Fatalf("StagePayload: %v", err)
 			}
@@ -229,29 +419,87 @@ func TestTheStageMessagesReadForSomebodyWhoDoesNotKnowWhatACommitIs(t *testing.T
 			if title, _ := embed["title"].(string); title != testCase.wantTitle {
 				t.Errorf("title = %q, want %q", title, testCase.wantTitle)
 			}
-			if body, _ := embed["description"].(string); body != testCase.wantBody {
-				t.Errorf("body = %q, want %q", body, testCase.wantBody)
+			// the clock is there because the stages land seconds apart and a log
+			// that does not say when says nothing about the order
+			body, _ := embed["description"].(string)
+			if body != "14:05:09  "+testCase.wantLine {
+				t.Errorf("body = %q, want the line stamped with the time", body)
 			}
 			if colour, _ := embed["color"].(float64); int(colour) != testCase.wantColour {
 				t.Errorf("colour = %#x, want %#x", int(colour), testCase.wantColour)
 			}
 
 			fields := fieldsOf(t, embed)
-			if fields["version"] != testCase.wantLine {
-				t.Errorf("version = %q, want %q", fields["version"], testCase.wantLine)
+			if fields["version"] != testCase.wantVerion {
+				t.Errorf("version = %q, want %q", fields["version"], testCase.wantVerion)
 			}
-			// hostnames, because somebody reading the channel knows the site by its
-			// domain and has never heard of the container behind it
-			if fields["affected"] != "lecternmc.com, bot" {
+			// hostnames one per line, because somebody reading the channel knows the
+			// site by its domain and has never heard of the container behind it
+			if fields["affected"] != "```\nlecternmc.com\nbot\n```" {
 				t.Errorf("affected = %q", fields["affected"])
 			}
 			for _, jargon := range []string{"commit", "container", "stateless", "cutover", "healthcheck"} {
-				body, _ := embed["description"].(string)
 				if strings.Contains(strings.ToLower(body), jargon) {
 					t.Errorf("the body says %q, which means nothing to somebody using the site", jargon)
 				}
 			}
 		})
+	}
+}
+
+// The version and the affected list sit beside each other rather than stacked,
+// since both are short and the log underneath them is what needs the width.
+func TestTheVersionAndAffectedFieldsSitSideBySide(t *testing.T) {
+	payload, err := StagePayload(stageLive, nil, "lmc", []string{"lecternmc.com"}, StageVersions{Incoming: "def5678"})
+	if err != nil {
+		t.Fatalf("StagePayload: %v", err)
+	}
+
+	raw, _ := decodeEmbed(t, payload)["fields"].([]any)
+	if len(raw) != 2 {
+		t.Fatalf("expected two fields, got %d", len(raw))
+	}
+	for _, entry := range raw {
+		field, _ := entry.(map[string]any)
+		if inline, _ := field["inline"].(bool); !inline {
+			t.Errorf("%v should be inline", field["name"])
+		}
+	}
+}
+
+// The message is a log, so what it said before has to still be there afterwards.
+// Somebody who looks at the channel once, after the fact, should be able to read
+// the whole release out of the one message.
+func TestTheLogKeepsEveryLineAndTheEmbedTracksTheLatestStage(t *testing.T) {
+	at := time.Date(2026, 8, 17, 14, 5, 9, 0, time.UTC)
+
+	var log []string
+	for offset, stage := range []DeployStage{stageReady, stageSwitching, stageLive} {
+		log = appendLine(log, stage, at.Add(time.Duration(offset*11)*time.Second))
+	}
+
+	payload, err := StagePayload(stageLive, log, "lmc", nil, StageVersions{Incoming: "def5678"})
+	if err != nil {
+		t.Fatalf("StagePayload: %v", err)
+	}
+
+	embed := decodeEmbed(t, payload)
+	body, _ := embed["description"].(string)
+
+	want := "14:05:09  there is a new version being staged\n" +
+		"14:05:20  switching over to the new version now, usually without any interruption\n" +
+		"14:05:31  the new version is up and answering"
+	if body != want {
+		t.Errorf("the log reads\n%s\n\nwant\n%s", body, want)
+	}
+
+	// the last stage is the one the colour and the title are about, since that is
+	// the state the thing is actually in
+	if colour, _ := embed["color"].(float64); int(colour) != 0x2ecc71 {
+		t.Errorf("colour = %#x, want the green of the last line", int(colour))
+	}
+	if title, _ := embed["title"].(string); title != "update live" {
+		t.Errorf("title = %q, want the last stage", title)
 	}
 }
 
@@ -291,7 +539,7 @@ func TestAffectedNamesPrefersDomainsOverServiceNames(t *testing.T) {
 func mustStagePayload(t *testing.T, stage DeployStage, versions StageVersions) []byte {
 	t.Helper()
 
-	payload, err := StagePayload(stage, "lmc", nil, versions)
+	payload, err := StagePayload(stage, nil, "lmc", nil, versions)
 	if err != nil {
 		t.Fatalf("StagePayload: %v", err)
 	}
@@ -307,18 +555,8 @@ func TestARealDeploySendsTheArcInOrderAndSaysNothingBeforeThereIsAnythingToSay(t
 
 	const variable = "DEPLOY_TEST_ARC_WEBHOOK"
 
-	received := make(chan map[string]any, 16)
-	webhook := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		body, _ := io.ReadAll(request.Body)
-		var message struct {
-			Embeds []map[string]any `json:"embeds"`
-		}
-		json.Unmarshal(body, &message)
-		received <- message.Embeds[0]
-		writer.WriteHeader(http.StatusNoContent)
-	}))
-	defer webhook.Close()
-	t.Setenv(variable, webhook.URL)
+	received, webhookURL := fakeDiscord(t)
+	t.Setenv(variable, webhookURL)
 
 	repository := newRepository(t)
 	writeFile(t, repository, configFileName, `{
@@ -352,7 +590,7 @@ func TestARealDeploySendsTheArcInOrderAndSaysNothingBeforeThereIsAnythingToSay(t
 		t.Fatalf("the first deploy should succeed: %v", err)
 	}
 
-	titlesOf(t, received, []string{"new version ready", "update live"})
+	titlesOf(t, received, []string{"staging new deployment", "update live"})
 
 	// a second deploy has something to switch away from, so all three fire
 	second := commitFile(t, repository, "one.txt", "second")
@@ -363,12 +601,20 @@ func TestARealDeploySendsTheArcInOrderAndSaysNothingBeforeThereIsAnythingToSay(t
 		t.Fatalf("the second deploy should succeed: %v", err)
 	}
 
-	arc := titlesOf(t, received, []string{"new version ready", "switching over", "update live"})
+	arc := titlesOf(t, received, []string{"staging new deployment", "switching over", "update live"})
 	wantLine := ShortCommit(first) + " -> " + ShortCommit(second)
-	for _, embed := range arc {
-		if version := fieldsOf(t, embed)["version"]; version != wantLine {
+	for _, next := range arc {
+		if version := fieldsOf(t, next.embed)["version"]; version != wantLine {
 			t.Errorf("version = %q, want %q", version, wantLine)
 		}
+	}
+
+	// the three land within seconds of each other, so they are one message being
+	// rewritten rather than three arriving together
+	if methods := methodsOf(arc); !slices.Equal(
+		methods, []string{http.MethodPost, http.MethodPatch, http.MethodPatch},
+	) {
+		t.Errorf("the arc should be one message that changes, got %v", methods)
 	}
 
 	// a dirty tree never reaches a build, and is nobody's business but the
@@ -379,26 +625,64 @@ func TestARealDeploySendsTheArcInOrderAndSaysNothingBeforeThereIsAnythingToSay(t
 	}
 
 	select {
-	case embed := <-received:
-		t.Errorf("a failure before any build told users %q", embed["title"])
+	case next := <-received:
+		t.Errorf("a failure before any build told users %q", next.embed["title"])
 	case <-time.After(2 * time.Second):
 	}
 }
 
+// notification is one thing the channel was told, and how. The method matters
+// because the arc is supposed to be a single message being rewritten.
+type notification struct {
+	method string
+	embed  map[string]any
+}
+
+// fakeDiscord answers the way Discord does, which means handing back the created
+// message so there is an id to edit. A server that only ever answered 204 would
+// quietly push these tests down the fallback path and prove nothing about the
+// arc being one message.
+func fakeDiscord(t *testing.T) (chan notification, string) {
+	t.Helper()
+
+	received := make(chan notification, 16)
+
+	webhook := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		body, _ := io.ReadAll(request.Body)
+
+		var message struct {
+			Embeds []map[string]any `json:"embeds"`
+		}
+		if err := json.Unmarshal(body, &message); err != nil || len(message.Embeds) != 1 {
+			t.Errorf("%s carried no embed: %v", request.Method, err)
+
+			return
+		}
+
+		received <- notification{method: request.Method, embed: message.Embeds[0]}
+
+		writer.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(writer, `{"id": "1417"}`)
+	}))
+	t.Cleanup(webhook.Close)
+
+	return received, webhook.URL + "/api/webhooks/1/abc"
+}
+
 // titlesOf drains exactly the expected number of notifications and checks their
 // order, since the order is the message.
-func titlesOf(t *testing.T, received chan map[string]any, want []string) []map[string]any {
+func titlesOf(t *testing.T, received chan notification, want []string) []notification {
 	t.Helper()
 
 	var got []string
-	var embeds []map[string]any
+	var arrived []notification
 
 	for range want {
 		select {
-		case embed := <-received:
-			title, _ := embed["title"].(string)
+		case next := <-received:
+			title, _ := next.embed["title"].(string)
 			got = append(got, title)
-			embeds = append(embeds, embed)
+			arrived = append(arrived, next)
 		case <-time.After(20 * time.Second):
 			t.Fatalf("expected %v, only got %v", want, got)
 		}
@@ -408,7 +692,18 @@ func titlesOf(t *testing.T, received chan map[string]any, want []string) []map[s
 		t.Errorf("the arc was %v, want %v", got, want)
 	}
 
-	return embeds
+	return arrived
+}
+
+// methodsOf is how each of them arrived, so a run can assert that one message
+// was rewritten rather than that several were posted.
+func methodsOf(arrived []notification) []string {
+	var methods []string
+	for _, next := range arrived {
+		methods = append(methods, next.method)
+	}
+
+	return methods
 }
 
 func TestTheRollbackAndDowntimeMessages(t *testing.T) {
@@ -420,7 +715,7 @@ func TestTheRollbackAndDowntimeMessages(t *testing.T) {
 	if title, _ := rollingBack["title"].(string); title != "rolling back" {
 		t.Errorf("title = %q", title)
 	}
-	if body, _ := rollingBack["description"].(string); body != "we are going back to an earlier version, usually without any interruption" {
+	if body, _ := rollingBack["description"].(string); body != "14:05:09  we are going back to an earlier version, usually without any interruption" {
 		t.Errorf("body = %q", body)
 	}
 	if colour, _ := rollingBack["color"].(float64); int(colour) != 0xf39c12 {
@@ -436,7 +731,7 @@ func TestTheRollbackAndDowntimeMessages(t *testing.T) {
 	if title, _ := failed["title"].(string); title != "rollback failed" {
 		t.Errorf("title = %q", title)
 	}
-	if body, _ := failed["description"].(string); body != "the earlier version could not be started, so nothing changed" {
+	if body, _ := failed["description"].(string); body != "14:05:09  the earlier version could not be started, so nothing changed" {
 		t.Errorf("body = %q", body)
 	}
 	if version := fieldsOf(t, failed)["version"]; version != "def5678" {
@@ -468,7 +763,9 @@ func TestTheRollbackAndDowntimeMessages(t *testing.T) {
 func mustStage(t *testing.T, stage DeployStage, projectName string, versions StageVersions) []byte {
 	t.Helper()
 
-	payload, err := StagePayload(stage, projectName, []string{"lecternmc.com"}, versions)
+	log := appendLine(nil, stage, time.Date(2026, 8, 17, 14, 5, 9, 0, time.UTC))
+
+	payload, err := StagePayload(stage, log, projectName, []string{"lecternmc.com"}, versions)
 	if err != nil {
 		t.Fatalf("StagePayload: %v", err)
 	}
@@ -483,18 +780,8 @@ func TestARealRollbackAndDestroyBothSpeakToUsers(t *testing.T) {
 
 	const variable = "DEPLOY_TEST_LIFECYCLE_WEBHOOK"
 
-	received := make(chan map[string]any, 16)
-	webhook := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		body, _ := io.ReadAll(request.Body)
-		var message struct {
-			Embeds []map[string]any `json:"embeds"`
-		}
-		json.Unmarshal(body, &message)
-		received <- message.Embeds[0]
-		writer.WriteHeader(http.StatusNoContent)
-	}))
-	defer webhook.Close()
-	t.Setenv(variable, webhook.URL)
+	received, webhookURL := fakeDiscord(t)
+	t.Setenv(variable, webhookURL)
 
 	repository := newRepository(t)
 	writeFile(t, repository, configFileName, `{
@@ -526,7 +813,7 @@ func TestARealRollbackAndDestroyBothSpeakToUsers(t *testing.T) {
 	if _, err := RunDeploy(options); err != nil {
 		t.Fatalf("first deploy: %v", err)
 	}
-	titlesOf(t, received, []string{"new version ready", "update live"})
+	titlesOf(t, received, []string{"staging new deployment", "update live"})
 
 	second := commitFile(t, repository, "one.txt", "second")
 	t.Cleanup(func() {
@@ -535,7 +822,7 @@ func TestARealRollbackAndDestroyBothSpeakToUsers(t *testing.T) {
 	if _, err := RunDeploy(options); err != nil {
 		t.Fatalf("second deploy: %v", err)
 	}
-	titlesOf(t, received, []string{"new version ready", "switching over", "update live"})
+	titlesOf(t, received, []string{"staging new deployment", "switching over", "update live"})
 
 	if _, err := RunRollback(options, ""); err != nil {
 		t.Fatalf("the rollback should succeed: %v", err)
@@ -543,8 +830,14 @@ func TestARealRollbackAndDestroyBothSpeakToUsers(t *testing.T) {
 
 	rolled := titlesOf(t, received, []string{"rolling back"})
 	wantLine := ShortCommit(first) + " <- " + ShortCommit(second)
-	if version := fieldsOf(t, rolled[0])["version"]; version != wantLine {
+	if version := fieldsOf(t, rolled[0].embed)["version"]; version != wantLine {
 		t.Errorf("version = %q, want %q", version, wantLine)
+	}
+
+	// a rollback is its own thing rather than a late edit of the deploy that came
+	// before it, so it starts a message of its own
+	if rolled[0].method != http.MethodPost {
+		t.Errorf("a rollback should start its own message, got %s", rolled[0].method)
 	}
 
 	if _, err := RunDestroy(options, false, strings.NewReader("lifecycle\n")); err != nil {
