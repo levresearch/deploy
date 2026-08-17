@@ -191,12 +191,16 @@ one cloudflared per host block, so two hostnames means two tunnels and two token
 }
 ```
 
-a webhook url is a credential, anyone who has it can post in your channel, so it goes in the config by name the same way a tunnel token does. deploy looks the name up in two places, your shell first and then `.deploy/secrets.env`:
+you don't have to write any of that yourself, `deploy dwh` does it:
 
 ```bash
-mkdir -p .deploy
-umask 077 && echo 'DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/...' >> .deploy/secrets.env
+deploy dwh https://discord.com/api/webhooks/...   # sets it up
+deploy dwh                                        # says whether one is set
 ```
+
+that writes the url to `.deploy/secrets.env` at mode 600, adds the notify block to your config, makes sure `.deploy/` is gitignored, and posts a test message so you find out right there if the url is wrong.
+
+a webhook url is a credential, anyone who has it can post in your channel, so it goes in the config by name the same way a tunnel token does. deploy looks the name up in two places, your shell first and then `.deploy/secrets.env`.
 
 `.deploy/` is gitignored, and deploy re-adds that line every run, so the webhook stays out of your repo. it never reaches your server either, because `git archive` only ships tracked files. the shell wins over the file, which is what makes ci work without one.
 
@@ -235,6 +239,8 @@ fine for something small. it's a single stage build so every source change re-ru
 | `deploy shell web` | a shell inside the running container |
 | `deploy exec web -- npm run seed` | run one thing inside it |
 | `deploy env push .env.production` | put a secrets file on the server, mode 600 |
+| `deploy dwh <url>` | set the discord webhook for this project |
+| `deploy dwh` | say whether a webhook is set, without printing it |
 | `deploy rollback` | back to the previous release |
 | `deploy rollback 9f4be0a` | back to any release still on the server |
 | `deploy destroy` | remove the project, keeps your data |

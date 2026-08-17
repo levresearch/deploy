@@ -261,7 +261,40 @@ func NewNotifier(repositoryPath string, notify *Notify) (*Notifier, error) {
 		)
 	}
 
-	return &Notifier{webhookURL: webhookURL, client: &http.Client{Timeout: notifyTimeout}}, nil
+	return &Notifier{webhookURL: webhookURL, client: newNotifyClient()}, nil
+}
+
+func newNotifyClient() *http.Client {
+	return &http.Client{Timeout: notifyTimeout}
+}
+
+// SendTest returns its error instead of swallowing it, which is the opposite of
+// Send and the whole point: here the person is waiting to be told whether the
+// webhook they just pasted actually works.
+func (notifier *Notifier) SendTest(projectName string) error {
+	payload, err := json.Marshal(discordMessage{
+		Embeds: []discordEmbed{{
+			Title:     truncate(fmt.Sprintf("deploy is now wired up for %s", projectName), discordTitleLimit),
+			Color:     0x3498db,
+			Fields:    []discordField{{Name: "This is a test", Value: "you will get one of these when a deploy, rollback, or destroy finishes"}},
+			Timestamp: time.Now().UTC().Format(time.RFC3339),
+		}},
+	})
+	if err != nil {
+		return err
+	}
+
+	response, err := notifier.client.Post(notifier.webhookURL, "application/json", bytes.NewReader(payload))
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+
+	if response.StatusCode >= 300 {
+		return fmt.Errorf("discord answered %s", response.Status)
+	}
+
+	return nil
 }
 
 // lookupSecret checks the environment before the file, so CI, where secrets

@@ -35,6 +35,7 @@ func init() {
 		"env":      runEnv,
 		"rollback": runRollback,
 		"destroy":  runDestroy,
+		"dwh":      runConfigureWebhook,
 		"status":   func(args []string) int { return runInspect(args, "status") },
 		"list":     func(args []string) int { return runInspect(args, "list") },
 		"logs":     func(args []string) int { return runInspect(args, "logs") },
@@ -334,6 +335,8 @@ usage:
   deploy destroy          tear this project down, keeping data unless --volumes
   deploy releases         releases on the destination, current one marked
   deploy env push <file>  upload an env file to the destination
+  deploy dwh [<url>]      set the discord webhook for this project, or
+                          say whether one is set
   deploy rollback [<commit>]
                           activate a retained release, default the previous one
 
@@ -355,4 +358,39 @@ flags:
 
 func fatal(format string, args ...any) {
 	fmt.Fprintf(os.Stderr, "FATAL - "+format+"\n", args...)
+}
+
+// runConfigureWebhook takes the url positionally rather than as a flag, because
+// deploy dwh <url> is the whole command and a flag would only be ceremony.
+func runConfigureWebhook(args []string) int {
+	flags := newFlagSet("dwh")
+	options := DeployOptions{}
+	stringFlag(flags, &options.Context, "context", "C", "", "scope deploy to this path instead of the cwd")
+
+	if err := flags.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return exitOK
+		}
+
+		return exitPreconditionNotMet
+	}
+
+	leftover := flags.Args()
+	if len(leftover) > 1 {
+		fatal("deploy dwh takes one webhook url, not %d", len(leftover))
+
+		return exitPreconditionNotMet
+	}
+
+	var webhookURL string
+	if len(leftover) == 1 {
+		webhookURL = leftover[0]
+	}
+
+	exitCode, err := RunConfigureWebhook(options, webhookURL, nil)
+	if err != nil {
+		fatal("%v", err)
+	}
+
+	return exitCode
 }

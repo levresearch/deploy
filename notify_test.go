@@ -227,7 +227,7 @@ func TestTheWebhookIsReadFromTheEnvironmentOrTheGitignoredSecretsFile(t *testing
 		t.Setenv(variable, "")
 
 		repository := t.TempDir()
-		writeSecret(t, repository, variable+"="+webhook)
+		writeSecretFixture(t, repository, variable+"="+webhook)
 
 		notifier, err := NewNotifier(repository, &Notify{DiscordWebhookFrom: variable})
 		if err != nil {
@@ -245,7 +245,7 @@ func TestTheWebhookIsReadFromTheEnvironmentOrTheGitignoredSecretsFile(t *testing
 		t.Setenv(variable, fromEnvironment)
 
 		repository := t.TempDir()
-		writeSecret(t, repository, variable+"="+webhook)
+		writeSecretFixture(t, repository, variable+"="+webhook)
 
 		notifier, err := NewNotifier(repository, &Notify{DiscordWebhookFrom: variable})
 		if err != nil {
@@ -308,7 +308,7 @@ NOT_AN_ASSIGNMENT
 	}
 }
 
-func writeSecret(t *testing.T, repository, line string) {
+func writeSecretFixture(t *testing.T, repository, line string) {
 	t.Helper()
 
 	directory := filepath.Join(repository, deployDirectoryName)
