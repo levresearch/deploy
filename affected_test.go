@@ -428,3 +428,91 @@ func TestAffectedRefusesALayoutWhereOneServiceHoldsAnother(t *testing.T) {
 		t.Errorf("the error should name both services, got: %v", err)
 	}
 }
+
+// A cache mount belongs to no image and survives every commit, so a build that
+// reused a stale one is indistinguishable from one that did not. Deploy names
+// them for the same reason it names everything else it decided quietly.
+func TestTheCacheMountsADockerfileKeepsAreReadOffIt(t *testing.T) {
+	cases := []struct {
+		name       string
+		dockerfile string
+		targets    []string
+	}{
+		{
+			name:       "nothing is kept",
+			dockerfile: "FROM node:24-slim\nRUN pnpm build\n",
+		},
+		{
+			name:       "one mount",
+			dockerfile: "RUN --mount=type=cache,target=/app/.turbo pnpm turbo build\n",
+			targets:    []string{"/app/.turbo"},
+		},
+		{
+			// the shape these are actually written in, across continued lines
+			name: "several across a line continuation",
+			dockerfile: "RUN --mount=type=cache,target=/app/.turbo \\\n" +
+				"    --mount=type=cache,target=/app/apps/web/.next/cache \\\n" +
+				"    pnpm turbo build --filter=@lmc/web...\n",
+			targets: []string{"/app/.turbo", "/app/apps/web/.next/cache"},
+		},
+		{
+			// a bind mount is not kept between builds, so it is not worth naming
+			name:       "a mount that is not a cache",
+			dockerfile: "RUN --mount=type=bind,target=/src ls\n",
+		},
+		{
+			name: "the same target twice is said once",
+			dockerfile: "RUN --mount=type=cache,target=/app/.turbo pnpm build\n" +
+				"RUN --mount=type=cache,target=/app/.turbo pnpm test\n",
+			targets: []string{"/app/.turbo"},
+		},
+	}
+
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			got := CacheMountTargets([]byte(testCase.dockerfile))
+
+			if !slices.Equal(got, testCase.targets) {
+				t.Errorf("targets = %v, want %v", got, testCase.targets)
+			}
+		})
+	}
+}
+
+// The dockerfile a build runs comes from the commit, not the working tree, so a
+// mount added and not yet committed is not one the build will use.
+func TestCacheMountsAreReadFromTheCommitBeingBuilt(t *testing.T) {
+	repository := newRepository(t)
+	commit := commitFile(t, repository, "apps/web/Dockerfile",
+		"FROM node:24-slim\nRUN --mount=type=cache,target=/app/.turbo pnpm build\n")
+
+	got := CacheMountsFor(repository, commit, "apps/web/Dockerfile", nil)
+	if !slices.Equal(got, []string{"/app/.turbo"}) {
+		t.Errorf("mounts = %v, want [/app/.turbo]", got)
+	}
+
+	// staged as well as written, so the index differs from the commit too and
+	// reading either one of them instead would show up here
+	writeFile(t, repository, "apps/web/Dockerfile",
+		"FROM node:24-slim\nRUN --mount=type=cache,target=/uncommitted pnpm build\n")
+	if _, err := runGit(repository, "add", "-A"); err != nil {
+		t.Fatalf("staging the edit: %v", err)
+	}
+	if got := CacheMountsFor(repository, commit, "apps/web/Dockerfile", nil); !slices.Equal(got, []string{"/app/.turbo"}) {
+		t.Errorf("an uncommitted edit is not what gets built, got %v", got)
+	}
+
+	// a generated dockerfile is never in the repository, so it comes from the
+	// context deploy built rather than from git
+	generated := map[string][]byte{
+		"Dockerfile.deploy": []byte("RUN --mount=type=cache,target=/generated pnpm build\n"),
+	}
+	if got := CacheMountsFor(repository, commit, "Dockerfile.deploy", generated); !slices.Equal(got, []string{"/generated"}) {
+		t.Errorf("mounts = %v, want [/generated]", got)
+	}
+
+	// a dockerfile that is not in the commit is not a failure, just nothing said
+	if got := CacheMountsFor(repository, commit, "apps/gone/Dockerfile", nil); got != nil {
+		t.Errorf("expected nothing for a missing dockerfile, got %v", got)
+	}
+}

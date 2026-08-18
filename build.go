@@ -163,6 +163,7 @@ func (builder *Builder) Build(
 ) error {
 	tag := ImageTag(builder.projectID, serviceName, commit)
 	fmt.Printf("  building %s (%s)\n", tag, builder.Describe())
+	reportCacheMounts(repositoryPath, commit, dockerfile, extraContext)
 
 	if builder.onDestination {
 		return builder.buildOnDestination(commit, serviceName, dockerfile, tag, extraContext)
@@ -179,6 +180,60 @@ func (builder *Builder) Build(
 	}
 
 	return builder.verifyArchitecture(tag)
+}
+
+// reportCacheMounts names the directories a dockerfile keeps between builds. A
+// cache mount is invisible to the layer hash, so a build that reused a stale one
+// looks exactly like a build that did not, which makes it the first thing worth
+// suspecting when an image comes out wrong and the one thing the output would
+// otherwise never mention.
+func reportCacheMounts(repositoryPath, commit, dockerfile string, extraContext map[string][]byte) {
+	if targets := CacheMountsFor(repositoryPath, commit, dockerfile, extraContext); len(targets) > 0 {
+		fmt.Printf("    reusing cache mounts across builds: %s\n", strings.Join(targets, " "))
+	}
+}
+
+// CacheMountsFor finds the dockerfile a build is about to run and reads its
+// cache mounts off it. A generated one is only ever in the context deploy built,
+// and a committed one is read from the commit rather than the working tree,
+// since that is what the build is actually handed.
+func CacheMountsFor(repositoryPath, commit, dockerfile string, extraContext map[string][]byte) []string {
+	contents, isGenerated := extraContext[dockerfile]
+	if !isGenerated {
+		shown, err := runGit(repositoryPath, "show", commit+":"+dockerfile)
+		if err != nil {
+			return nil
+		}
+		contents = []byte(shown)
+	}
+
+	return CacheMountTargets(contents)
+}
+
+// CacheMountTargets lists what a dockerfile mounts as a cache, which survives
+// between builds and between commits and belongs to no image.
+func CacheMountTargets(dockerfile []byte) []string {
+	var targets []string
+
+	for field := range strings.FieldsSeq(string(dockerfile)) {
+		specification, isMount := strings.CutPrefix(field, "--mount=")
+		if !isMount {
+			continue
+		}
+
+		options := strings.Split(specification, ",")
+		if !slices.Contains(options, "type=cache") {
+			continue
+		}
+		for _, option := range options {
+			target, isTarget := strings.CutPrefix(option, "target=")
+			if isTarget && !slices.Contains(targets, target) {
+				targets = append(targets, target)
+			}
+		}
+	}
+
+	return targets
 }
 
 // HasImage answers whether the destination can still run an image an earlier
@@ -255,6 +310,7 @@ func (builder *Builder) runBuild(
 		// a warning nobody can act on trains people to ignore warnings
 		if _, err := os.Stat(path.Join(cache, "index.json")); err == nil {
 			command = append(command, "--cache-from", "type=local,src="+cache)
+			fmt.Printf("    reusing the layer cache in %s\n", cache)
 		}
 	} else {
 		command = append(command, "build")
