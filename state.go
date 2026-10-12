@@ -6,13 +6,11 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
-	"os/signal"
 	"path"
 	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
-	"syscall"
 	"time"
 )
 
@@ -242,135 +240,14 @@ func stopRelease(runner Runner, projectID, commit, composeFile string) {
 func pruneImages(runner Runner, projectID, commit string) {
 	reference := fmt.Sprintf("deploy-%s/*:%s", projectID, commit)
 
-	listed, err := runner.Run([]string{"docker", "images", "--filter", "reference=" + reference, "--quiet"})
+	listed, err := runner.Run([]string{"docker", "images", "--filter", "reference=" + reference, "--format", "{{.Repository}}:{{.Tag}}"})
 	if err != nil {
 		return
 	}
 
-	for _, imageID := range strings.Fields(string(listed)) {
-		if _, err := runner.Run([]string{"docker", "image", "rm", "--force", imageID}); err != nil {
-			fmt.Fprintf(os.Stderr, "warning: could not remove image %s: %v\n", imageID, err)
+	for _, tag := range strings.Fields(string(listed)) {
+		if _, err := runner.Run([]string{"docker", "image", "rm", tag}); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: could not remove image %s: %v\n", tag, err)
 		}
 	}
-}
-
-type Lock struct {
-	PID       int       `json:"pid"`
-	Host      string    `json:"host"`
-	Commit    string    `json:"commit"`
-	TakenAt   time.Time `json:"takenAt"`
-	lockPath  string
-	lockOwner Runner
-}
-
-// AcquireLock stops two deploys interleaving release directories and corrupting
-// state.json. A deploy that dies mid run leaves the lock behind, which is what
-// the pid and timestamp are for, and what --force-unlock breaks.
-func AcquireLock(runner Runner, layout Layout, commit string, force bool) (*Lock, error) {
-	if err := runner.MkdirAll(layout.Root); err != nil {
-		return nil, err
-	}
-
-	lockPath := layout.LockFile()
-	if !force {
-		if existing, held := readLock(runner, lockPath); held {
-			// a lock left by a deploy that is definitely gone is not a lock, it is
-			// litter, and making someone type --force-unlock to clear up after a
-			// ctrl-c teaches them to reach for that flag by reflex
-			if reason, stale := existing.isStale(); stale {
-				fmt.Printf("  clearing a stale lock, %s\n", reason)
-			} else {
-				return nil, fmt.Errorf(
-					"another deploy holds this project, started by pid %d on %s %s ago. if that deploy is gone, break it with --force-unlock",
-					existing.PID, existing.Host, time.Since(existing.TakenAt).Round(time.Second),
-				)
-			}
-		}
-	}
-
-	hostname, _ := os.Hostname()
-	lock := &Lock{
-		PID:       os.Getpid(),
-		Host:      hostname,
-		Commit:    ShortCommit(commit),
-		TakenAt:   time.Now().UTC().Truncate(time.Second),
-		lockPath:  lockPath,
-		lockOwner: runner,
-	}
-
-	encoded, err := json.Marshal(lock)
-	if err != nil {
-		return nil, err
-	}
-	if err := runner.WriteFile(lockPath, append(encoded, '\n')); err != nil {
-		return nil, fmt.Errorf("taking the lock: %w", err)
-	}
-
-	return lock, nil
-}
-
-func (lock *Lock) Release() {
-	if err := lock.lockOwner.RemoveAll(lock.lockPath); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: could not release %s: %v\n", lock.lockPath, err)
-	}
-}
-
-// isStale reports whether the deploy that took this lock is definitely gone.
-//
-// It can only tell for a lock taken on this machine, because a pid means nothing
-// on a different one, and guessing there would let two deploys run at once. A
-// lock from elsewhere stays put and the operator decides.
-func (lock Lock) isStale() (string, bool) {
-	hostname, err := os.Hostname()
-	if err != nil || hostname == "" || lock.Host != hostname {
-		return "", false
-	}
-	if lock.PID <= 0 {
-		return "it names no process", true
-	}
-
-	// on unix FindProcess always succeeds, so signal 0 is what actually asks
-	// whether the process is there. EPERM means it exists and is somebody else's,
-	// which is still alive
-	process, err := os.FindProcess(lock.PID)
-	if err != nil {
-		return fmt.Sprintf("pid %d is gone from this machine", lock.PID), true
-	}
-
-	err = process.Signal(syscall.Signal(0))
-	if errors.Is(err, os.ErrProcessDone) || errors.Is(err, syscall.ESRCH) {
-		return fmt.Sprintf("pid %d is gone from this machine", lock.PID), true
-	}
-
-	return "", false
-}
-
-// ReleaseOnSignal is what stops a ctrl-c leaving the lock behind. Go does not run
-// deferred functions when a signal kills the process, so without this every
-// interrupted deploy litters a lock for the next one to trip over.
-func (lock *Lock) ReleaseOnSignal() {
-	interrupted := make(chan os.Signal, 1)
-	signal.Notify(interrupted, os.Interrupt, syscall.SIGTERM)
-
-	go func() {
-		<-interrupted
-		fmt.Fprintf(os.Stderr, "\ninterrupted, releasing the lock\n")
-		lock.Release()
-		os.Exit(exitDeployFailed)
-	}()
-}
-
-func readLock(runner Runner, lockPath string) (Lock, bool) {
-	raw, err := runner.ReadFile(lockPath)
-	if err != nil {
-		return Lock{}, false
-	}
-
-	var lock Lock
-	if err := json.Unmarshal(raw, &lock); err != nil {
-		// an unreadable lock file is still a lock, since something wrote it
-		return Lock{}, true
-	}
-
-	return lock, true
 }

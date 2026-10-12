@@ -177,7 +177,7 @@ func RunDeploy(options DeployOptions) (exitCode int, err error) {
 	if err != nil {
 		return exitPreconditionNotMet, err
 	}
-	layout := NewLayout(destination.Path, resolved.ID)
+	layout := NewLayout(destination.Path, resolved.RuntimeID())
 
 	facts, err := CheckDestination(runner, resolved, layout)
 	if err != nil {
@@ -188,14 +188,14 @@ func RunDeploy(options DeployOptions) (exitCode int, err error) {
 	// buildx fails here rather than after a release has been placed
 	buildOnDestination := resolveBuildOnDestination(options.BuildOnDest, resolved.BuildOnDestination)
 
-	builder, err := NewBuilder(runner, facts, resolved.ID, repositoryPath, destination.IsRemote(), buildOnDestination)
+	builder, err := NewBuilder(runner, facts, resolved.RuntimeID(), repositoryPath, destination.IsRemote(), buildOnDestination)
 	if err != nil {
 		return exitPreconditionNotMet, err
 	}
 
 	fmt.Printf(
-		"deploying %s %s to %s (%s)\n",
-		resolved.Name, ShortCommit(commit), destination, builder.Describe(),
+		"deploying %s/%s %s to %s (%s)\n",
+		resolved.Name, resolved.Environment, ShortCommit(commit), destination, builder.Describe(),
 	)
 
 	lock, err := AcquireLock(runner, layout, commit, options.ForceUnlock)
@@ -205,7 +205,7 @@ func RunDeploy(options DeployOptions) (exitCode int, err error) {
 	lock.ReleaseOnSignal()
 	defer lock.Release()
 
-	state, err := ReadState(runner, layout)
+	state, err := claimEnvironment(runner, resolved, layout)
 	if err != nil {
 		return exitPreconditionNotMet, err
 	}
@@ -236,7 +236,7 @@ func RunDeploy(options DeployOptions) (exitCode int, err error) {
 		return exitDeployFailed, err
 	}
 
-	if _, err := startShared(runner, layout, resolved); err != nil {
+	if _, err := startShared(runner, layout, resolved, commit); err != nil {
 		return exitDeployFailed, err
 	}
 
@@ -266,10 +266,10 @@ func RunDeploy(options DeployOptions) (exitCode int, err error) {
 	// file with no services in it. the release is still placed and recorded, so
 	// adding an app later is an ordinary deploy rather than a special case
 	if len(stateless) > 0 {
-		if err := startStack(runner, composeFile, ProjectName(resolved.ID, commit)); err != nil {
+		if err := startStack(runner, composeFile, ProjectName(resolved.RuntimeID(), commit)); err != nil {
 			return exitDeployFailed, err
 		}
-		fmt.Printf("  %s is up\n", ProjectName(resolved.ID, commit))
+		fmt.Printf("  %s is up\n", ProjectName(resolved.RuntimeID(), commit))
 	} else {
 		fmt.Printf("  nothing to run per commit, this project is all stateful services\n")
 	}
@@ -286,7 +286,7 @@ func RunDeploy(options DeployOptions) (exitCode int, err error) {
 	// failure is reported and never rolled back
 	state = state.RecordRelease(commit, resolved.Environment)
 	state.Name = resolved.Name
-	state, pruneErr := PruneReleases(runner, layout, resolved.ID, state, resolved.Retention)
+	state, pruneErr := PruneReleases(runner, layout, resolved.RuntimeID(), state, resolved.Retention)
 
 	if err := WriteState(runner, layout, state); err != nil {
 		return exitLiveButNeedsAHuman, fmt.Errorf(
@@ -341,9 +341,9 @@ func RunReleases(options DeployOptions) (int, error) {
 	if err != nil {
 		return exitPreconditionNotMet, err
 	}
-	layout := NewLayout(destination.Path, resolved.ID)
+	layout := NewLayout(destination.Path, resolved.RuntimeID())
 
-	state, err := ReadState(runner, layout)
+	state, err := checkEnvironment(runner, resolved, layout)
 	if err != nil {
 		return exitPreconditionNotMet, err
 	}
@@ -425,8 +425,17 @@ func RunEnvPush(options DeployOptions, localPath string) (int, error) {
 	if err != nil {
 		return exitPreconditionNotMet, err
 	}
-	layout := NewLayout(destination.Path, resolved.ID)
+	layout := NewLayout(destination.Path, resolved.RuntimeID())
 	name := path.Base(localPath)
+	lock, err := AcquireLock(runner, layout, "env-push", options.ForceUnlock)
+	if err != nil {
+		return exitPreconditionNotMet, err
+	}
+	lock.ReleaseOnSignal()
+	defer lock.Release()
+	if _, err := claimEnvironment(runner, resolved, layout); err != nil {
+		return exitPreconditionNotMet, err
+	}
 
 	if err := PushEnvFile(runner, layout, name, contents); err != nil {
 		return exitDeployFailed, err
@@ -558,8 +567,8 @@ func tunnelNames(hosted []string) []string {
 // every deploy and compared with what is already there, because "bring it up if
 // it is not running" would mean a changed postgres image, a new volume, or an
 // edited command silently never taking effect.
-func startShared(runner Runner, layout Layout, resolved ResolvedProject) (recreated []string, err error) {
-	network := NetworkName(resolved.ID)
+func startShared(runner Runner, layout Layout, resolved ResolvedProject, commit string) (recreated []string, err error) {
+	network := NetworkName(resolved.RuntimeID())
 	if output, err := runner.Run([]string{"docker", "network", "create", network}); err != nil {
 		// a network that already exists is the normal case on every deploy after
 		// the first. anything else is a real failure and swallowing it would turn
@@ -587,7 +596,7 @@ func startShared(runner Runner, layout Layout, resolved ResolvedProject) (recrea
 		return nil, nil
 	}
 
-	rendered, err := RenderShared(resolved, layout)
+	rendered, err := RenderShared(resolved, layout, commit)
 	if err != nil {
 		return nil, err
 	}
@@ -610,7 +619,7 @@ func startShared(runner Runner, layout Layout, resolved ResolvedProject) (recrea
 		return nil, err
 	}
 
-	if err := startStack(runner, sharedFile, SharedProjectName(resolved.ID), EnvFileArguments(resolved, layout)...); err != nil {
+	if err := startStack(runner, sharedFile, SharedProjectName(resolved.RuntimeID()), EnvFileArguments(resolved, layout)...); err != nil {
 		return nil, err
 	}
 	running := append(ServiceNames(stateful), tunnelNames(hosted)...)
@@ -646,7 +655,7 @@ func runReleaseTasks(runner Runner, resolved ResolvedProject, layout Layout, rel
 		run := []string{
 			"docker", "compose",
 			"--file", tasksFile,
-			"--project-name", ReleaseTasksProjectName(resolved.ID, commit),
+			"--project-name", ReleaseTasksProjectName(resolved.RuntimeID(), commit),
 			"run", "--rm", "--no-deps", name,
 		}
 

@@ -347,7 +347,7 @@ flags:
                             destination extract without an upload
   -D, --destination <path>  where the project gets deployed
       --allow-dirty         deploy with uncommitted changes present
-      --force-unlock        break a stale deploy.lock
+      --force-unlock        clear abandoned legacy metadata; never bypass an active lock
       --affected            only rebuild the services that changes since the
                             last deploy reached, reusing the images for the
                             rest. anything changed that no service is built

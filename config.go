@@ -313,6 +313,9 @@ func mergeService(base, override Service) Service {
 // a config one error per run is miserable.
 func (resolved ResolvedProject) Validate() error {
 	var problems []error
+	if !validEnvironment(resolved.Environment) {
+		problems = append(problems, errors.New("environment must be a lowercase slug of at most 32 characters"))
+	}
 
 	if !projectIDPattern.MatchString(resolved.ID) {
 		problems = append(problems, fmt.Errorf(

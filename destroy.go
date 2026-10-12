@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path"
+	"reflect"
 	"slices"
 	"strings"
 )
@@ -19,7 +20,7 @@ import (
 // more than anything else here, and the thing on the other side of this check is
 // a sibling project somebody else is still running.
 func projectPathWithin(destinationPath, projectID string) (string, error) {
-	if !projectIDPattern.MatchString(projectID) {
+	if !validRuntimeID(projectID) {
 		return "", fmt.Errorf("refusing to remove %q, which is not a deploy id", projectID)
 	}
 
@@ -56,7 +57,7 @@ func PlanDestroy(
 	onDisk []string,
 	removeVolumes bool,
 ) (DestroyPlan, error) {
-	root, err := projectPathWithin(destinationPath, resolved.ID)
+	root, err := projectPathWithin(destinationPath, resolved.RuntimeID())
 	if err != nil {
 		return DestroyPlan{}, err
 	}
@@ -73,11 +74,11 @@ func PlanDestroy(
 
 	plan := DestroyPlan{
 		ProjectName:   resolved.Name,
-		ProjectID:     resolved.ID,
+		ProjectID:     resolved.RuntimeID(),
 		Root:          root,
 		Releases:      releases,
-		SharedProject: SharedProjectName(resolved.ID),
-		Network:       NetworkName(resolved.ID),
+		SharedProject: SharedProjectName(resolved.RuntimeID()),
+		Network:       NetworkName(resolved.RuntimeID()),
 		Volumes:       VolumesFor(resolved),
 		RemoveVolumes: removeVolumes,
 	}
@@ -156,7 +157,7 @@ func RunDestroy(options DeployOptions, removeVolumes bool, confirmation io.Reade
 		}
 	}
 
-	state, err := ReadState(runner, layout)
+	state, err := checkEnvironment(runner, resolved, layout)
 	if err != nil {
 		return exitPreconditionNotMet, err
 	}
@@ -176,14 +177,27 @@ func RunDestroy(options DeployOptions, removeVolumes bool, confirmation io.Reade
 		return exitPreconditionNotMet, err
 	}
 
-	// the lock is taken so a destroy cannot interleave with a deploy, and forced
-	// because a project being torn down is not a project to wait politely for
-	lock, err := AcquireLock(runner, layout, "destroy", true)
+	lock, err := AcquireLock(runner, layout, "destroy", options.ForceUnlock)
 	if err != nil {
 		return exitPreconditionNotMet, err
 	}
 	lock.ReleaseOnSignal()
 	defer lock.Release()
+	current, err := checkEnvironment(runner, resolved, layout)
+	if err != nil {
+		return exitPreconditionNotMet, err
+	}
+	entries, err := runner.ListDirectory(layout.Releases())
+	if err != nil {
+		return exitPreconditionNotMet, err
+	}
+	updated, err := PlanDestroy(resolved, layout, destination.Path, current, entries, removeVolumes)
+	if err != nil {
+		return exitPreconditionNotMet, err
+	}
+	if !reflect.DeepEqual(state, current) || !reflect.DeepEqual(plan, updated) {
+		return exitPreconditionNotMet, fmt.Errorf("deployment changed during confirmation; run destroy again to review the new plan")
+	}
 
 	if err := ExecuteDestroy(runner, layout, plan); err != nil {
 		return exitDeployFailed, err
@@ -275,16 +289,18 @@ func ExecuteDestroy(runner Runner, layout Layout, plan DestroyPlan) error {
 
 func removeProjectImages(runner Runner, projectID string) {
 	listed, err := runner.Run([]string{
-		"docker", "images", "--filter", "reference=deploy-" + projectID + "/*", "--quiet",
+		"docker", "images", "--filter", "reference=deploy-" + projectID + "/*", "--format", "{{.Repository}}:{{.Tag}}",
 	})
 	if err != nil {
 		return
 	}
 
 	removed := 0
-	for _, imageID := range strings.Fields(string(listed)) {
-		if _, err := runner.Run([]string{"docker", "image", "rm", "--force", imageID}); err == nil {
+	for _, tag := range strings.Fields(string(listed)) {
+		if _, err := runner.Run([]string{"docker", "image", "rm", tag}); err == nil {
 			removed++
+		} else {
+			fmt.Fprintf(os.Stderr, "warning: could not remove image %s: %v\n", tag, err)
 		}
 	}
 	if removed > 0 {

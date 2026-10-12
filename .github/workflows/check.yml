@@ -76,5 +76,11 @@ jobs:
           docker compose version
           docker buildx inspect --bootstrap | grep -i platforms
 
+      - name: SSH test fixture
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y openssh-server
+          sudo mkdir -p /run/sshd
+
       - name: full test suite
-        run: go test ./...
+        run: go test -timeout 25m ./...

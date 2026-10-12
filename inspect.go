@@ -42,7 +42,7 @@ func LocateService(
 	// belongs to whichever release is current
 	if service.IsStateful() {
 		return ServiceLocation{
-			ProjectName: SharedProjectName(resolved.ID),
+			ProjectName: SharedProjectName(resolved.RuntimeID()),
 			ComposeFile: layout.SharedComposeFile(),
 			Stateful:    true,
 		}, nil
@@ -55,7 +55,7 @@ func LocateService(
 	}
 
 	return ServiceLocation{
-		ProjectName: ProjectName(resolved.ID, state.Current),
+		ProjectName: ProjectName(resolved.RuntimeID(), state.Current),
 		ComposeFile: path.Join(layout.Release(state.Current), composeFileName),
 	}, nil
 }
@@ -138,7 +138,12 @@ func openProject(options DeployOptions) (ResolvedProject, Layout, Runner, func()
 		return ResolvedProject{}, Layout{}, nil, nil, Destination{}, err
 	}
 
-	return resolved, NewLayout(destination.Path, resolved.ID), runner, closeRunner, destination, nil
+	layout := NewLayout(destination.Path, resolved.RuntimeID())
+	if _, err := checkEnvironment(runner, resolved, layout); err != nil {
+		closeRunner()
+		return ResolvedProject{}, Layout{}, nil, nil, Destination{}, err
+	}
+	return resolved, layout, runner, closeRunner, destination, nil
 }
 
 func RunStatus(options DeployOptions) (int, error) {
@@ -169,12 +174,12 @@ func RunStatus(options DeployOptions) (int, error) {
 
 	stateful, stateless := SplitServices(resolved.Services)
 
-	fmt.Printf("\n  release stack, %s\n", ProjectName(resolved.ID, state.Current))
-	printServiceStatuses(runner, ProjectName(resolved.ID, state.Current), stateless)
+	fmt.Printf("\n  release stack, %s\n", ProjectName(resolved.RuntimeID(), state.Current))
+	printServiceStatuses(runner, ProjectName(resolved.RuntimeID(), state.Current), stateless)
 
 	if len(stateful) > 0 {
-		fmt.Printf("\n  shared stack, %s\n", SharedProjectName(resolved.ID))
-		printServiceStatuses(runner, SharedProjectName(resolved.ID), stateful)
+		fmt.Printf("\n  shared stack, %s\n", SharedProjectName(resolved.RuntimeID()))
+		printServiceStatuses(runner, SharedProjectName(resolved.RuntimeID()), stateful)
 	}
 
 	if hosted := HostedServices(resolved.Services); len(hosted) > 0 {
@@ -330,7 +335,7 @@ func RunList(options DeployOptions) (int, error) {
 
 	var found []entry
 	for _, projectID := range slices.Sorted(slices.Values(projectIDs)) {
-		if !projectIDPattern.MatchString(projectID) {
+		if !validRuntimeID(projectID) {
 			continue
 		}
 		state, err := ReadState(runner, NewLayout(destination.Path, projectID))
@@ -352,7 +357,7 @@ func RunList(options DeployOptions) (int, error) {
 			name = "(unnamed)"
 		}
 		here := ""
-		if project.id == resolved.ID {
+		if project.id == resolved.RuntimeID() {
 			here = "  <- this one"
 		}
 

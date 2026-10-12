@@ -373,7 +373,7 @@ func TestNetworkCreationDistinguishesAlreadyExistingFromRealFailure(t *testing.T
 			runner.failCommands = []string{"network create"}
 			runner.responses["network create"] = testCase.output
 
-			_, err := startShared(runner, layout, resolved)
+			_, err := startShared(runner, layout, resolved, "aaaaaaa")
 
 			if testCase.wantFail {
 				if err == nil {
