@@ -1,0 +1,14 @@
+[Unit]
+Description=Disposable Docker daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/dockerd
+Restart=on-failure
+Delegate=yes
+KillMode=process
+TimeoutStartSec=90
+
+[Install]
+WantedBy=multi-user.target
