@@ -89,7 +89,7 @@ func Cutover(
 
 	hosted := HostedServices(resolved.Services)
 	supersededCompose := path.Join(layout.Release(superseded), composeFileName)
-	supersededProject := ProjectName(resolved.ID, superseded)
+	supersededProject := ProjectName(resolved.RuntimeID(), superseded)
 
 	// announced once here rather than separately down each path below, so there
 	// is one line to get right and one line to test. a project with no public
@@ -101,7 +101,7 @@ func Cutover(
 	// project with no public hostname still has people using it, a bot being the
 	// obvious one, so it is still announced
 	if len(hosted) == 0 {
-		stopRelease(runner, resolved.ID, superseded, supersededCompose)
+		stopRelease(runner, resolved.RuntimeID(), superseded, supersededCompose)
 		fmt.Printf("  stopped %s, which this release replaces\n", supersededProject)
 
 		return nil
@@ -111,7 +111,7 @@ func Cutover(
 	// question from the healthcheck compose already ran inside the container
 	for _, name := range hosted {
 		host := resolved.Services[name].Host
-		if err := reachableOnNetwork(runner, NetworkName(resolved.ID), name, host.Port); err != nil {
+		if err := reachableOnNetwork(runner, NetworkName(resolved.RuntimeID()), name, host.Port); err != nil {
 			return fmt.Errorf(
 				"%s is up but not reachable at %s:%d on the shared network, so the tunnel would not find it either: %w",
 				name, name, host.Port, err,
@@ -150,7 +150,7 @@ func Cutover(
 	}
 
 	// only now, once the public hostname has answered from the new release
-	stopRelease(runner, resolved.ID, superseded, supersededCompose)
+	stopRelease(runner, resolved.RuntimeID(), superseded, supersededCompose)
 	fmt.Printf("  removed %s\n", supersededProject)
 
 	return nil

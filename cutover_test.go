@@ -37,7 +37,7 @@ func TestOneCloudflaredPerHostBlockAndAllInTheSharedStack(t *testing.T) {
 	resolved := loadAndResolve(t, hostedConfig, defaultEnvironmentName)
 	layout := NewLayout("/srv/projects", "a3f19c02")
 
-	sharedRaw, err := RenderShared(resolved, layout)
+	sharedRaw, err := RenderShared(resolved, layout, "aaaaaaa")
 	if err != nil {
 		t.Fatalf("RenderShared: %v", err)
 	}
@@ -67,7 +67,7 @@ func TestOneCloudflaredPerHostBlockAndAllInTheSharedStack(t *testing.T) {
 func TestTheTunnelTokenIsNeverInTheRenderedFile(t *testing.T) {
 	resolved := loadAndResolve(t, hostedConfig, defaultEnvironmentName)
 
-	sharedRaw, err := RenderShared(resolved, NewLayout("/srv/projects", "a3f19c02"))
+	sharedRaw, err := RenderShared(resolved, NewLayout("/srv/projects", "a3f19c02"), "aaaaaaa")
 	if err != nil {
 		t.Fatalf("RenderShared: %v", err)
 	}
@@ -233,7 +233,7 @@ func TestAProjectWithNoHostBlockNeedsNoTunnelAndNoVerification(t *testing.T) {
 	resolved := loadAndResolve(t, contents, defaultEnvironmentName)
 	layout := NewLayout("/srv/projects", "a3f19c02")
 
-	sharedRaw, err := RenderShared(resolved, layout)
+	sharedRaw, err := RenderShared(resolved, layout, "aaaaaaa")
 	if err != nil {
 		t.Fatalf("RenderShared: %v", err)
 	}
@@ -295,7 +295,7 @@ func TestPublicVerificationAcceptsAnyAnswerThatIsNotAServerError(t *testing.T) {
 func TestRenderedTunnelIsValidCompose(t *testing.T) {
 	resolved := loadAndResolve(t, hostedConfig, defaultEnvironmentName)
 
-	sharedRaw, err := RenderShared(resolved, NewLayout("/srv/projects", "a3f19c02"))
+	sharedRaw, err := RenderShared(resolved, NewLayout("/srv/projects", "a3f19c02"), "aaaaaaa")
 	if err != nil {
 		t.Fatalf("RenderShared: %v", err)
 	}
@@ -328,7 +328,7 @@ func TestTheRenderedSharedStackWithTunnelsIsAcceptedByCompose(t *testing.T) {
 	writeFile(t, layout.EnvDirectory(), ".env.production",
 		"WEB_TUNNEL_TOKEN=not-a-real-token\nAPI_TUNNEL_TOKEN=also-not-real\n")
 
-	rendered, err := RenderShared(resolved, layout)
+	rendered, err := RenderShared(resolved, layout, "aaaaaaa")
 	if err != nil {
 		t.Fatalf("RenderShared: %v", err)
 	}
@@ -369,7 +369,7 @@ func TestAMissingTunnelTokenIsRefusedByCompose(t *testing.T) {
 	}
 	writeFile(t, layout.EnvDirectory(), ".env.production", "SOMETHING_ELSE=fine\n")
 
-	rendered, err := RenderShared(resolved, layout)
+	rendered, err := RenderShared(resolved, layout, "aaaaaaa")
 	if err != nil {
 		t.Fatalf("RenderShared: %v", err)
 	}
@@ -414,7 +414,7 @@ func TestTheSharedStackStartsForTunnelsEvenWithNothingStateful(t *testing.T) {
 		t.Fatalf("this project has nothing stateful, got %v", stateful)
 	}
 
-	sharedRaw, err := RenderShared(resolved, NewLayout("/srv/projects", "a3f19c02"))
+	sharedRaw, err := RenderShared(resolved, NewLayout("/srv/projects", "a3f19c02"), "aaaaaaa")
 	if err != nil {
 		t.Fatalf("RenderShared: %v", err)
 	}

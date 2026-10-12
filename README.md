@@ -75,6 +75,20 @@ so if you want to deploy only what's in staging, you run deploy -e staging or de
 
 deploy automatically deploys in prod btw
 
+production keeps its original deployment names. other environments use their own
+project-id/environment identity for state, secrets, containers, networks, named
+volumes and image tags. environment names must be lowercase slugs, at most 32
+characters. explicit bind mounts, published ports and tunnel domains still need
+separate configuration when the environments run on the same host.
+
+old deployments recorded under a different environment are refused, not moved.
+resolve their ownership and transition their data explicitly before deploying.
+stop all older cli processes before upgrading: they do not understand the new
+lock. the destination needs `flock` (util-linux); mutating commands hold a live
+exclusive lock, including destroy and env push. never delete `.deploy-locks/`
+while a command is running. `--force-unlock` can clear abandoned legacy metadata
+but cannot bypass a live lock.
+
 database, and anything else that holds data you care about:
 ```jsonc
 {
@@ -304,7 +318,7 @@ logs, shell and exec work out which stack the service is in themselves, you neve
 | `-G, --git-storage` | override where the bare repo is |
 | `-e, --environment` | which environment, prod by default |
 | `--allow-dirty` | deploy with uncommitted changes. it still builds the commit, not your working tree |
-| `--force-unlock` | break a lock left behind by a deploy that died |
+| `--force-unlock` | clear abandoned legacy lock metadata after checking the old process has stopped; never bypass a live lock |
 | `--build-on-destination` | build on the server instead of on your machine |
 
 **exit codes**, if you're scripting it:

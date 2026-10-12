@@ -254,7 +254,7 @@ func TestStateRoundTrips(t *testing.T) {
 	}
 }
 
-func TestLockBlocksASecondDeployAndForceUnlockBreaksIt(t *testing.T) {
+func TestLockBlocksASecondDeployEvenWithForceUnlock(t *testing.T) {
 	layout := NewLayout(t.TempDir(), "a3f19c02")
 	runner := LocalRunner{}
 
@@ -271,11 +271,10 @@ func TestLockBlocksASecondDeployAndForceUnlockBreaksIt(t *testing.T) {
 		t.Errorf("the refusal should name the way out, got: %v", err)
 	}
 
-	forced, err := AcquireLock(runner, layout, "bbbbbbb", true)
-	if err != nil {
-		t.Fatalf("--force-unlock should break a stale lock: %v", err)
+	if _, err := AcquireLock(runner, layout, "bbbbbbb", true); err == nil {
+		t.Fatal("--force-unlock must not break a live advisory lock")
 	}
-	forced.Release()
+	first.Release()
 
 	if _, err := os.Stat(layout.LockFile()); err == nil {
 		t.Error("releasing the lock should remove the file")
@@ -286,9 +285,11 @@ func TestLockBlocksASecondDeployAndForceUnlockBreaksIt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the lock should be free again: %v", err)
 	}
-	again.Release()
-
 	first.Release()
+	if _, err := AcquireLock(runner, layout, "ddddddd", false); err == nil {
+		t.Fatal("an old handle must not release the next owner's lock")
+	}
+	again.Release()
 }
 
 // A lock left by a deploy that is definitely gone is not a lock, it is litter.

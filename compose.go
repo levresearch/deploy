@@ -79,10 +79,10 @@ func SplitServices(services map[string]Service) (stateful, stateless map[string]
 
 // RenderShared is the stack that outlives every release. It owns the volumes, so
 // nothing here is ever renamed and nothing here is pruned.
-func RenderShared(resolved ResolvedProject, layout Layout) ([]byte, error) {
+func RenderShared(resolved ResolvedProject, layout Layout, commit string) ([]byte, error) {
 	stateful, _ := SplitServices(resolved.Services)
 
-	rendered, err := renderProject(resolved, layout, SharedProjectName(resolved.ID), stateful, "")
+	rendered, err := renderProject(resolved, layout, SharedProjectName(resolved.RuntimeID()), stateful, commit)
 	if err != nil {
 		return nil, err
 	}
@@ -116,14 +116,14 @@ func RenderShared(resolved ResolvedProject, layout Layout) ([]byte, error) {
 func RenderRelease(resolved ResolvedProject, layout Layout, commit string) ([]byte, error) {
 	_, stateless := SplitServices(resolved.Services)
 
-	return renderProject(resolved, layout, ProjectName(resolved.ID, commit), stateless, commit)
+	return renderProject(resolved, layout, ProjectName(resolved.RuntimeID(), commit), stateless, commit)
 }
 
 // RenderReleaseTasks is a stack nothing ever brings up. Each task is started one
 // at a time with compose run, which is what gives them env files, volumes, and
 // the shared network without any of it being restated here.
 func RenderReleaseTasks(resolved ResolvedProject, layout Layout, commit string) ([]byte, error) {
-	return renderProject(resolved, layout, ReleaseTasksProjectName(resolved.ID, commit), resolved.Release, commit)
+	return renderProject(resolved, layout, ReleaseTasksProjectName(resolved.RuntimeID(), commit), resolved.Release, commit)
 }
 
 func ReleaseTasksProjectName(id, commit string) string {
@@ -152,7 +152,7 @@ func renderProject(
 		Name:     projectName,
 		Services: rendered,
 		Networks: map[string]any{
-			"default": map[string]any{"name": NetworkName(resolved.ID), "external": true},
+			"default": map[string]any{"name": NetworkName(resolved.RuntimeID()), "external": true},
 		},
 	}
 
@@ -187,7 +187,7 @@ func renderService(
 
 	image := service.Image
 	if len(service.Build) > 0 {
-		image = ImageTag(resolved.ID, name, commit)
+		image = ImageTag(resolved.RuntimeID(), name, commit)
 	}
 	if err := setField(fields, "image", image); err != nil {
 		return nil, err
@@ -208,7 +208,7 @@ func renderService(
 	}
 
 	if volumes, found := fields["volumes"]; found {
-		rewritten, err := rewriteVolumes(resolved.ID, name, volumes, declaredVolumes)
+		rewritten, err := rewriteVolumes(resolved.RuntimeID(), name, volumes, declaredVolumes)
 		if err != nil {
 			return nil, err
 		}
@@ -319,7 +319,7 @@ func VolumesFor(resolved ResolvedProject) []string {
 		for _, entry := range entries {
 			source, _, cut := strings.Cut(entry, ":")
 			if cut && !isBindMount(source) {
-				found[VolumeName(resolved.ID, source)] = true
+				found[VolumeName(resolved.RuntimeID(), source)] = true
 			}
 		}
 	}

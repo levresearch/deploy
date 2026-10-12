@@ -131,7 +131,7 @@ func RunRollback(options DeployOptions, requested string) (exitCode int, err err
 	if err != nil {
 		return exitPreconditionNotMet, err
 	}
-	layout := NewLayout(destination.Path, resolved.ID)
+	layout := NewLayout(destination.Path, resolved.RuntimeID())
 
 	lock, err := AcquireLock(runner, layout, requested, options.ForceUnlock)
 	if err != nil {
@@ -140,7 +140,7 @@ func RunRollback(options DeployOptions, requested string) (exitCode int, err err
 	lock.ReleaseOnSignal()
 	defer lock.Release()
 
-	state, err := ReadState(runner, layout)
+	state, err := checkEnvironment(runner, resolved, layout)
 	if err != nil {
 		return exitPreconditionNotMet, err
 	}
@@ -166,14 +166,14 @@ func RunRollback(options DeployOptions, requested string) (exitCode int, err err
 	// images are already sitting there. that is what makes this the fastest thing
 	// deploy does
 	targetCompose := path.Join(layout.Release(target), composeFileName)
-	if err := startStack(runner, targetCompose, ProjectName(resolved.ID, target)); err != nil {
+	if err := startStack(runner, targetCompose, ProjectName(resolved.RuntimeID(), target)); err != nil {
 		return exitDeployFailed, err
 	}
-	fmt.Printf("  %s is up\n", ProjectName(resolved.ID, target))
+	fmt.Printf("  %s is up\n", ProjectName(resolved.RuntimeID(), target))
 
 	// the release being left is only stopped once the older one is proven healthy,
 	// so a rollback that cannot start leaves you no worse off
-	stopRelease(runner, resolved.ID, leaving, path.Join(layout.Release(leaving), composeFileName))
+	stopRelease(runner, resolved.RuntimeID(), leaving, path.Join(layout.Release(leaving), composeFileName))
 	switched = true
 
 	state = state.RecordRollback(target)
