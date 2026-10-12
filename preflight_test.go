@@ -137,6 +137,11 @@ func TestDestinationCheckReportsExactlyWhatIsMissing(t *testing.T) {
 	}{
 		{name: "everything present"},
 		{
+			name:        "state synchronization unavailable",
+			absent:      []string{"sync"},
+			wantMissing: []string{"GNU coreutils (sync)"},
+		},
+		{
 			name:        "no docker at all",
 			absent:      []string{"docker"},
 			wantMissing: []string{"docker", "docker compose plugin"},

@@ -89,6 +89,19 @@ exclusive lock, including destroy and env push. never delete `.deploy-locks/`
 while a command is running. `--force-unlock` can clear abandoned legacy metadata
 but cannot bypass a live lock.
 
+state writes require GNU coreutils (`mktemp`, `mv`, and `sync`) on the destination.
+deploy and rollback check these tools before changing containers. state is written
+to a private temporary file in the same directory, checked for a complete transfer,
+flushed, and atomically renamed. the directory and its ancestors are then flushed
+so newly created project directories are persisted too. existing unversioned state
+remains readable; new writes identify state format 1. unsupported state versions
+are refused. version 2 configuration still cannot execute.
+
+if state persistence fails after a rename or the SSH connection is lost, the write
+may already have happened. inspect state and running containers before retrying;
+an error is not proof that a release task or deployment did not run. this storage
+change does not yet add an operation journal or disconnect-safe mutation ownership.
+
 database, and anything else that holds data you care about:
 ```jsonc
 {

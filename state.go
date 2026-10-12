@@ -26,6 +26,7 @@ const (
 var commitPattern = regexp.MustCompile(`^[0-9a-f]{7,40}$`)
 
 type State struct {
+	Version int `json:"version,omitempty"`
 	// Name is here so deploy list can say what a project is without reading a
 	// config it has no path to. A destination full of hex ids is unreadable.
 	Name        string    `json:"name,omitempty"`
@@ -59,11 +60,18 @@ func ReadState(runner Runner, layout Layout) (State, error) {
 	if err := json.Unmarshal(raw, &state); err != nil {
 		return State{}, fmt.Errorf("%s is unreadable: %w", layout.StateFile(), err)
 	}
+	if state.Version != 0 && state.Version != 1 {
+		return State{}, fmt.Errorf("%s uses unsupported state version %d; use a compatible deploy version", layout.StateFile(), state.Version)
+	}
 
 	return state, nil
 }
 
 func WriteState(runner Runner, layout Layout, state State) error {
+	if state.Version != 0 && state.Version != 1 {
+		return fmt.Errorf("refusing to write unsupported state version %d", state.Version)
+	}
+	state.Version = 1
 	state.UpdatedAt = time.Now().UTC().Truncate(time.Second)
 
 	encoded, err := json.MarshalIndent(state, "", "  ")
@@ -71,7 +79,7 @@ func WriteState(runner Runner, layout Layout, state State) error {
 		return err
 	}
 
-	return runner.WriteFile(layout.StateFile(), append(encoded, '\n'))
+	return writeStateFile(runner, layout.StateFile(), append(encoded, '\n'))
 }
 
 // RecordRelease moves a newly deployed commit to the front. Redeploying the
