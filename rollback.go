@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path"
@@ -67,7 +68,13 @@ func (state State) RecordRollback(target string) State {
 	return state
 }
 
-func RunRollback(options DeployOptions, requested string) (exitCode int, err error) {
+func RunRollback(options DeployOptions, requested string, only ...string) (exitCode int, err error) {
+	if repositoryPath, isService := isServiceConfig(options); isService {
+		return RunServiceRollback(options, repositoryPath, requested, only)
+	}
+	if len(only) > 0 {
+		return exitPreconditionNotMet, errors.New("--service needs a version 2 config; version 1 rolls back the whole release")
+	}
 	// announced before the attempt rather than after it, so the message is what
 	// somebody wants to read while it happens. a rollback that never got as far
 	// as moving anything says so, and one that landed needs no second message

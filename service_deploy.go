@@ -183,9 +183,6 @@ func RunServiceDeploy(options DeployOptions, repositoryPath string) (exitCode in
 	if options.Destination != "" {
 		return exitPreconditionNotMet, errors.New("version 2 takes its destination from the config; --destination applies to version 1")
 	}
-	if options.Affected {
-		return exitPreconditionNotMet, errors.New("--affected is not available for version 2 yet")
-	}
 	if options.ForceUnlock {
 		return exitPreconditionNotMet, errors.New("--force-unlock is for legacy version 1 lock metadata and does not apply to version 2")
 	}
@@ -273,8 +270,14 @@ func RunServiceDeploy(options DeployOptions, repositoryPath string) (exitCode in
 		return exitDeployFailed, err
 	}
 	fmt.Printf("  placed release in %s\n", releaseDirectory)
+	var reuse map[string]string
+	if options.Affected {
+		if reuse, err = planServiceReuse(builder, resolved, repositoryPath, state, commit); err != nil {
+			return exitDeployFailed, err
+		}
+	}
 	builder.SetReleaseDirectory(releaseDirectory)
-	if err := buildServices(builder, resolved, repositoryPath, commit, nil); err != nil {
+	if err := buildServices(builder, resolved, repositoryPath, commit, reuse); err != nil {
 		return exitDeployFailed, err
 	}
 
