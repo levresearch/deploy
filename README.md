@@ -390,3 +390,17 @@ Observation requires Linux, `realpath`, a machine identity in `/etc/machine-id` 
 
 This is an observation of the current host, not a persistent ownership claim. Live releases, privileges, systemd, firewall rules, routes, secrets and application reachability remain unchecked, and host facts must be rechecked under locks before any future mutation. Version 2 execution remains unavailable.
 
+### managed-network experiments
+
+`test/network` probes the proposed WireGuard, firewall, service supervision and remote-operation locking mechanisms. It does not add multi-host deployment to the CLI.
+
+On Linux amd64 with local rootful Docker, accessible `/dev/kvm`, Node 24, about 3 GiB available memory and 6 GiB free disk, run:
+
+```sh
+DEPLOY_NETWORK_OUTPUT=/absolute/path/outside/the/checkout/network-results bash test/network/run.sh
+```
+
+The fixture downloads pinned Debian 12 and Docker 29.1.3, creates two disposable VMs inside a tools container, and tests real WireGuard traffic, NAT, UFW, no-op updates, reboots, rollback and disconnected SSH lock ownership. Guest packages require internet access. Only KVM is passed through; no host Docker socket, host network or privileged container is used. Firewall and systemd changes occur inside the VMs.
+
+Logs remain in the output directory. The runner removes its container, image tag, VM disks and disposable keys on success or failure; Docker build cache may remain. Do not run concurrently against the same output directory. This opt-in suite is separate from normal Go CI. It covers Debian amd64 with Docker's iptables backend; other platforms, power-loss durability and the future CLI integration still require acceptance tests.
+
