@@ -258,12 +258,12 @@ func TestLockBlocksASecondDeployEvenWithForceUnlock(t *testing.T) {
 	layout := NewLayout(t.TempDir(), "a3f19c02")
 	runner := LocalRunner{}
 
-	first, err := AcquireLock(runner, layout, "aaaaaaa", false)
+	first, err := AcquireLock(runner, layout, "deploy", "aaaaaaa", false)
 	if err != nil {
 		t.Fatalf("taking the lock: %v", err)
 	}
 
-	_, err = AcquireLock(runner, layout, "bbbbbbb", false)
+	_, err = AcquireLock(runner, layout, "deploy", "bbbbbbb", false)
 	if err == nil {
 		t.Fatal("a second deploy must not be able to take a held lock")
 	}
@@ -271,22 +271,23 @@ func TestLockBlocksASecondDeployEvenWithForceUnlock(t *testing.T) {
 		t.Errorf("the refusal should name the way out, got: %v", err)
 	}
 
-	if _, err := AcquireLock(runner, layout, "bbbbbbb", true); err == nil {
+	if _, err := AcquireLock(runner, layout, "deploy", "bbbbbbb", true); err == nil {
 		t.Fatal("--force-unlock must not break a live advisory lock")
 	}
-	first.Release()
+	finished := exitOK
+	first.Finish(&finished)
 
 	if _, err := os.Stat(layout.LockFile()); err == nil {
 		t.Error("releasing the lock should remove the file")
 	}
 
 	// and the project is deployable again afterwards
-	again, err := AcquireLock(runner, layout, "ccccccc", false)
+	again, err := AcquireLock(runner, layout, "deploy", "ccccccc", false)
 	if err != nil {
 		t.Fatalf("the lock should be free again: %v", err)
 	}
 	first.Release()
-	if _, err := AcquireLock(runner, layout, "ddddddd", false); err == nil {
+	if _, err := AcquireLock(runner, layout, "deploy", "ddddddd", false); err == nil {
 		t.Fatal("an old handle must not release the next owner's lock")
 	}
 	again.Release()
@@ -320,7 +321,7 @@ func TestAStaleLockFromThisMachineIsClearedAutomatically(t *testing.T) {
 		TakenAt: time.Now().Add(-5 * time.Minute).UTC(),
 	})
 
-	lock, err := AcquireLock(runner, layout, "bbbbbbb", false)
+	lock, err := AcquireLock(runner, layout, "deploy", "bbbbbbb", false)
 	if err != nil {
 		t.Fatalf("a lock held by a dead process should be cleared without --force-unlock: %v", err)
 	}
@@ -344,7 +345,7 @@ func TestALiveLockIsNeverClearedAutomatically(t *testing.T) {
 		PID: os.Getpid(), Host: hostname, Commit: "aaaaaaa", TakenAt: time.Now().UTC(),
 	})
 
-	if _, err := AcquireLock(runner, layout, "bbbbbbb", false); err == nil {
+	if _, err := AcquireLock(runner, layout, "deploy", "bbbbbbb", false); err == nil {
 		t.Fatal("a lock held by a running deploy must not be cleared")
 	}
 }
@@ -363,7 +364,7 @@ func TestALockFromAnotherMachineIsLeftAlone(t *testing.T) {
 		TakenAt: time.Now().Add(-time.Hour).UTC(),
 	})
 
-	_, err := AcquireLock(runner, layout, "bbbbbbb", false)
+	_, err := AcquireLock(runner, layout, "deploy", "bbbbbbb", false)
 	if err == nil {
 		t.Fatal("a lock from another machine must not be cleared, even an old one")
 	}
@@ -372,7 +373,7 @@ func TestALockFromAnotherMachineIsLeftAlone(t *testing.T) {
 	}
 
 	// and forcing still works, because that is what the flag is for
-	forced, err := AcquireLock(runner, layout, "bbbbbbb", true)
+	forced, err := AcquireLock(runner, layout, "deploy", "bbbbbbb", true)
 	if err != nil {
 		t.Fatalf("--force-unlock should break any lock: %v", err)
 	}

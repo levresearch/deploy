@@ -89,6 +89,16 @@ exclusive lock, including destroy and env push. never delete `.deploy-locks/`
 while a command is running. `--force-unlock` can clear abandoned legacy metadata
 but cannot bypass a live lock.
 
+before changing anything, each of those commands records what it is doing in
+`.deploy-locks/<project>.operation.json`, and removes the record once it has seen
+how the command ended, whether it succeeded or failed. a crash, ctrl-c, lost
+connection, or a release that is live but could not be recorded leaves the record
+behind, because a remote command can outlive the session that started it. the
+next mutating command then refuses with the operation's id. check that nothing
+from it is still running, inspect the deployment with `deploy status` and
+`deploy releases`, then run `deploy resolve <id>`. resolving clears the record
+only; it does not undo or repeat anything, and `--force-unlock` does not skip it.
+
 state writes require GNU coreutils (`mktemp`, `mv`, and `sync`) on the destination.
 deploy and rollback check these tools before changing containers. state is written
 to a private temporary file in the same directory, checked for a complete transfer,
@@ -317,6 +327,7 @@ fine for something small. it's a single stage build so every source change re-ru
 | `deploy dwh` | say whether a webhook is set, without printing it |
 | `deploy rollback` | back to the previous release |
 | `deploy rollback 9f4be0a` | back to any release still on the server |
+| `deploy resolve 3f2a9c1e0b7d4a65` | clear an operation that did not finish, after checking what it changed |
 | `deploy destroy` | remove the project, keeps your data |
 | `deploy destroy --volumes` | remove the data too |
 

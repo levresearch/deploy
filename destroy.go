@@ -177,12 +177,12 @@ func RunDestroy(options DeployOptions, removeVolumes bool, confirmation io.Reade
 		return exitPreconditionNotMet, err
 	}
 
-	lock, err := AcquireLock(runner, layout, "destroy", options.ForceUnlock)
+	lock, err := AcquireLock(runner, layout, "destroy", "", options.ForceUnlock)
 	if err != nil {
 		return exitPreconditionNotMet, err
 	}
 	lock.ReleaseOnSignal()
-	defer lock.Release()
+	defer lock.Finish(&exitCode)
 	current, err := checkEnvironment(runner, resolved, layout)
 	if err != nil {
 		return exitPreconditionNotMet, err

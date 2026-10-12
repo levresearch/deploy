@@ -55,7 +55,7 @@ func TestConcurrentLockHasOneWinner(t *testing.T) {
 		go func() {
 			defer contenders.Done()
 			<-start
-			lock, _ := AcquireLock(LocalRunner{}, layout, "aaaaaaa", false)
+			lock, _ := AcquireLock(LocalRunner{}, layout, "deploy", "aaaaaaa", false)
 			locks <- lock
 		}()
 	}

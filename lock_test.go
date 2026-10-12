@@ -16,7 +16,7 @@ func TestLockProcessHelper(t *testing.T) {
 	if root == "" {
 		return
 	}
-	lock, err := AcquireLock(LocalRunner{}, NewLayout(root, "abcd1234"), "aaaaaaa", false)
+	lock, err := AcquireLock(LocalRunner{}, NewLayout(root, "abcd1234"), "deploy", "aaaaaaa", false)
 	if err != nil {
 		os.Exit(2)
 	}
@@ -49,7 +49,7 @@ func TestLockSurvivesProjectRemovalAndProcessExit(t *testing.T) {
 	if err := os.RemoveAll(layout.Root); err != nil {
 		t.Fatal(err)
 	}
-	if lock, err := AcquireLock(LocalRunner{}, layout, "destroy", true); err == nil {
+	if lock, err := AcquireLock(LocalRunner{}, layout, "destroy", "", true); err == nil {
 		lock.Release()
 		t.Fatal("project removal or force-unlock bypassed active lock")
 	}
@@ -59,16 +59,27 @@ func TestLockSurvivesProjectRemovalAndProcessExit(t *testing.T) {
 	command.Wait()
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		lock, err := AcquireLock(LocalRunner{}, layout, "bbbbbbb", false)
-		if err == nil {
-			lock.Release()
+		_, err := AcquireLock(LocalRunner{}, layout, "deploy", "bbbbbbb", false)
+		if err != nil && strings.Contains(err.Error(), "did not finish") {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("lock survived dead owner: %v", err)
+			t.Fatalf("a killed owner should leave the lock free and its operation unresolved: %v", err)
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
+	operation, found, err := readOperation(LocalRunner{}, operationFile(layout))
+	if err != nil || !found {
+		t.Fatalf("the killed operation was not recorded: %v", err)
+	}
+	if err := ResolveOperation(LocalRunner{}, layout, operation.ID); err != nil {
+		t.Fatal(err)
+	}
+	lock, err := AcquireLock(LocalRunner{}, layout, "deploy", "bbbbbbb", false)
+	if err != nil {
+		t.Fatalf("a resolved operation still blocks: %v", err)
+	}
+	lock.Release()
 }
 
 func TestLostLockStopsTheOperation(t *testing.T) {
@@ -99,7 +110,7 @@ func TestMutatingCommandsRespectLocksAndConfirmation(t *testing.T) {
 	writeFile(t, repository, configFileName, `{"version":1,"id":"abcd1234","name":"locked","services":{"app":{"image":"example"}}}`)
 	options := DeployOptions{Context: repository, Destination: t.TempDir(), Environment: "production", ForceUnlock: true}
 	layout := NewLayout(options.Destination, "abcd1234")
-	lock, err := AcquireLock(LocalRunner{}, layout, "aaaaaaa", false)
+	lock, err := AcquireLock(LocalRunner{}, layout, "deploy", "aaaaaaa", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -118,7 +129,8 @@ func TestMutatingCommandsRespectLocksAndConfirmation(t *testing.T) {
 	if _, err := RunDestroy(options, true, strings.NewReader("locked\n")); err == nil || !strings.Contains(err.Error(), "active lock") {
 		t.Fatalf("destroy bypassed active lock: %v", err)
 	}
-	lock.Release()
+	finished := exitOK
+	lock.Finish(&finished)
 	confirmation := &changingConfirmation{Reader: strings.NewReader("locked\n"), change: func() {
 		if err := WriteState(LocalRunner{}, layout, State{Environment: "production", Current: "aaaaaaa", Releases: []string{"aaaaaaa"}}); err != nil {
 			t.Fatal(err)

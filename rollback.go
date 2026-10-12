@@ -140,12 +140,12 @@ func RunRollback(options DeployOptions, requested string) (exitCode int, err err
 		return exitPreconditionNotMet, missingPackages(runner.Describe(), missing)
 	}
 
-	lock, err := AcquireLock(runner, layout, requested, options.ForceUnlock)
+	lock, err := AcquireLock(runner, layout, "rollback", requested, options.ForceUnlock)
 	if err != nil {
 		return exitPreconditionNotMet, err
 	}
 	lock.ReleaseOnSignal()
-	defer lock.Release()
+	defer lock.Finish(&exitCode)
 
 	state, err := checkEnvironment(runner, resolved, layout)
 	if err != nil {

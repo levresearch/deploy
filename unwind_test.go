@@ -73,7 +73,7 @@ func TestUnwindAFailedDeployReleasesTheLock(t *testing.T) {
 	}
 
 	// and a project that failed is deployable again without --force-unlock
-	lock, err := AcquireLock(LocalRunner{}, layout, "aaaaaaa", false)
+	lock, err := AcquireLock(LocalRunner{}, layout, "deploy", "aaaaaaa", false)
 	if err != nil {
 		t.Fatalf("the project should not be locked after a failed deploy: %v", err)
 	}

@@ -198,12 +198,12 @@ func RunDeploy(options DeployOptions) (exitCode int, err error) {
 		resolved.Name, resolved.Environment, ShortCommit(commit), destination, builder.Describe(),
 	)
 
-	lock, err := AcquireLock(runner, layout, commit, options.ForceUnlock)
+	lock, err := AcquireLock(runner, layout, "deploy", commit, options.ForceUnlock)
 	if err != nil {
 		return exitPreconditionNotMet, err
 	}
 	lock.ReleaseOnSignal()
-	defer lock.Release()
+	defer lock.Finish(&exitCode)
 
 	state, err := claimEnvironment(runner, resolved, layout)
 	if err != nil {
@@ -381,7 +381,7 @@ func RunReleases(options DeployOptions) (int, error) {
 // RunEnvPush places one env file on the destination. Separate from deploy because
 // a secret is not something to re-upload on every release, and because it is the
 // answer preflight points at when one is missing.
-func RunEnvPush(options DeployOptions, localPath string) (int, error) {
+func RunEnvPush(options DeployOptions, localPath string) (exitCode int, err error) {
 	contents, err := os.ReadFile(localPath)
 	if err != nil {
 		return exitPreconditionNotMet, err
@@ -427,12 +427,12 @@ func RunEnvPush(options DeployOptions, localPath string) (int, error) {
 	}
 	layout := NewLayout(destination.Path, resolved.RuntimeID())
 	name := path.Base(localPath)
-	lock, err := AcquireLock(runner, layout, "env-push", options.ForceUnlock)
+	lock, err := AcquireLock(runner, layout, "env push", name, options.ForceUnlock)
 	if err != nil {
 		return exitPreconditionNotMet, err
 	}
 	lock.ReleaseOnSignal()
-	defer lock.Release()
+	defer lock.Finish(&exitCode)
 	if _, err := claimEnvironment(runner, resolved, layout); err != nil {
 		return exitPreconditionNotMet, err
 	}
