@@ -332,6 +332,58 @@ logs, shell and exec work out which stack the service is in themselves, you neve
 
 3 is on purpose. once traffic is on the new version, tearing it down over a failed cleanup would be causing an outage to report one
 
+### version 2 planning preview
+
+Version 2 makes every service and release task choose a named destination. This release supports offline validation, planning and a migration preview. Deployment and other existing project operations still require version 1; keep your deployment config on version 1 until the version 2 executor is available.
+
+```json
+{
+  "version": 2,
+  "id": "1234abcd",
+  "name": "example",
+  "destinations": {
+    "app": "app-host:Projects/example",
+    "data": "data-host:Projects/example"
+  },
+  "network": {
+    "cidr": "10.77.0.0/24",
+    "peers": {
+      "app": {"address": "10.77.0.1", "listenPort": 51820, "keepalive": 25},
+      "data": {"address": "10.77.0.2", "listenPort": 51820, "endpoint": "data.example.com:51820"}
+    }
+  },
+  "services": {
+    "api": {
+      "destination": "app",
+      "build": {"dockerfile": "Dockerfile"},
+      "dependsOn": {"db": "healthy"},
+      "connections": {
+        "database": {"service": "db", "endpoint": "sql", "hostEnv": "DB_HOST", "portEnv": "DB_PORT"}
+      }
+    },
+    "db": {
+      "destination": "data",
+      "build": {"dockerfile": "Dockerfile.db"},
+      "stateful": true,
+      "healthcheck": {"command": ["CMD", "pg_isready"]},
+      "endpoints": {"sql": {"port": 5432, "hostPort": 5432, "protocol": "tcp"}}
+    }
+  }
+}
+```
+
+- `deploy check -C <directory> -e production` validates every version 2 environment and prints the selected environment's plan. It does not require a Git commit.
+- `deploy plan -C <directory> -e production` also records the full HEAD commit and the resolved working-tree configuration digest. It does not read secrets or contact destinations. Generated host/port values are a preview; nothing is injected yet.
+- `deploy migrate -C <directory>` prints a version 1 conversion to stdout without writing the source. Add `-D host:Projects/example` if the old config has no destination. It preserves service options, release tasks, environments, notification settings and unknown legacy fields. Review the preview in a separate directory and run `check` there: stricter version 2 rules may require manual changes. Do not redirect into the source file, since the shell would truncate it before migration reads it.
+
+There is no root `destination` in version 2. Services and tasks inherit an explicit destination from their base definition unless an environment replaces it. Names use lowercase slugs of at most 32 characters. Endpoints currently support TCP over IPv4. A remote connection needs a stable provider `hostPort`, both declared peers and at least one configured UDP endpoint. Credentials remain an application concern.
+
+`dependsOn` controls readiness waves; `connections` controls communication. Bidirectional connections do not create a readiness cycle. `completed` requires a release task, and `healthy` requires an enabled health check. A release task must wait for its connection providers to be healthy. Service/task names cannot overlap.
+
+Endpoint and connection overrides replace whole named entries; an empty map clears inherited entries. An empty `dependsOn` clears inherited dependencies. An environment's network replaces the entire network definition. Non-production environments must be declared explicitly. Environments sharing a host need distinct network subnets and listen ports. Raw Compose topology overrides such as `network_mode`, `networks`, `depends_on`, privileged capabilities and `container_name` are refused. Use `env` for secret-file references; raw `env_file` is refused. Endpoint declarations cannot be combined with raw `ports` on the same service.
+
+A single-host plan, or several hosts without cross-host connections, needs only Docker networking. An unchanged network will eventually be reconciled without restarts, but this offline plan cannot determine actual changes. Host identity, SSH aliases, canonical paths, live releases, runtime environment collisions and firewall/route availability remain unverified. Same literal SSH hostnames are configuration hints, not verified machine identities. Retained releases may still need an existing tunnel. No interface, key, route, firewall rule or deployment directory is created by these commands.
+
 ### managed-network experiments
 
 `test/network` probes the proposed WireGuard, firewall, service supervision and remote-operation locking mechanisms. It does not add multi-host deployment to the CLI.

@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"maps"
-	"os"
 	"regexp"
 	"slices"
 	"strings"
@@ -26,12 +25,14 @@ var (
 )
 
 type Project struct {
-	Version     int    `json:"version"`
-	ID          string `json:"id"`
-	Name        string `json:"name"`
-	GitStorage  string `json:"gitStorage,omitempty"`
-	Destination string `json:"destination,omitempty"`
-	Retention   int    `json:"retention,omitempty"`
+	Version      int               `json:"version"`
+	ID           string            `json:"id"`
+	Name         string            `json:"name"`
+	GitStorage   string            `json:"gitStorage,omitempty"`
+	Destination  string            `json:"destination,omitempty"`
+	Destinations map[string]string `json:"destinations,omitempty"`
+	Network      *ManagedNetwork   `json:"network,omitempty"`
+	Retention    int               `json:"retention,omitempty"`
 	// BuildOnDestination belongs in the file rather than only on the command
 	// line because whether a project can be cross built is a fact about the
 	// project, not about the mood of whoever is deploying it today.
@@ -43,6 +44,7 @@ type Project struct {
 }
 
 type Environment struct {
+	Network  *ManagedNetwork    `json:"network,omitempty"`
 	Services map[string]Service `json:"services,omitempty"`
 	Release  map[string]Service `json:"release,omitempty"`
 }
@@ -50,6 +52,9 @@ type Environment struct {
 // Extra carries every key deploy does not own, so the compose renderer can hand
 // them through untouched rather than us chasing compose's schema forever.
 type Service struct {
+	Destination string
+	Endpoints   map[string]Endpoint
+	Connections map[string]Connection
 	Image       string
 	Build       json.RawMessage
 	Stateful    *bool
@@ -72,6 +77,8 @@ type ResolvedProject struct {
 	Name               string             `json:"name"`
 	GitStorage         string             `json:"gitStorage,omitempty"`
 	Destination        string             `json:"destination,omitempty"`
+	Destinations       map[string]string  `json:"destinations,omitempty"`
+	Network            *ManagedNetwork    `json:"network,omitempty"`
 	Retention          int                `json:"retention"`
 	BuildOnDestination bool               `json:"buildOnDestination,omitempty"`
 	Notify             *Notify            `json:"notify,omitempty"`
@@ -124,110 +131,24 @@ func buildPlan(serviceName string, service Service) (dockerfile string, extraCon
 	return asObject.Dockerfile, nil, nil
 }
 
-// serviceFields is the marshalling shape of the keys deploy owns. Service itself
-// cannot carry these tags because Extra has to merge in on top.
-type serviceFields struct {
-	Image       string            `json:"image,omitempty"`
-	Build       json.RawMessage   `json:"build,omitempty"`
-	Stateful    *bool             `json:"stateful,omitempty"`
-	Env         []string          `json:"env,omitempty"`
-	Host        *Host             `json:"host,omitempty"`
-	DependsOn   map[string]string `json:"dependsOn,omitempty"`
-	Healthcheck json.RawMessage   `json:"healthcheck,omitempty"`
-}
-
-func (service *Service) UnmarshalJSON(raw []byte) error {
-	var fields map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &fields); err != nil {
-		return err
-	}
-
-	for _, key := range slices.Sorted(maps.Keys(fields)) {
-		value := fields[key]
-		var err error
-
-		switch key {
-		case "image":
-			err = json.Unmarshal(value, &service.Image)
-		case "build":
-			service.Build = value
-		case "stateful":
-			var stateful bool
-			if err = json.Unmarshal(value, &stateful); err == nil {
-				service.Stateful = &stateful
-			}
-		case "env":
-			err = json.Unmarshal(value, &service.Env)
-		case "host":
-			err = json.Unmarshal(value, &service.Host)
-		case "dependsOn":
-			err = json.Unmarshal(value, &service.DependsOn)
-		case "healthcheck":
-			service.Healthcheck = value
-		default:
-			if service.Extra == nil {
-				service.Extra = map[string]json.RawMessage{}
-			}
-			service.Extra[key] = value
-		}
-
-		if err != nil {
-			return fmt.Errorf("key %q: %w", key, err)
-		}
-	}
-
-	return nil
-}
-
-func (service Service) MarshalJSON() ([]byte, error) {
-	encoded, err := json.Marshal(serviceFields{
-		Image:       service.Image,
-		Build:       service.Build,
-		Stateful:    service.Stateful,
-		Env:         service.Env,
-		Host:        service.Host,
-		DependsOn:   service.DependsOn,
-		Healthcheck: service.Healthcheck,
-	})
-	if err != nil {
-		return nil, err
-	}
-	if len(service.Extra) == 0 {
-		return encoded, nil
-	}
-
-	var fields map[string]json.RawMessage
-	if err := json.Unmarshal(encoded, &fields); err != nil {
-		return nil, err
-	}
-	maps.Copy(fields, service.Extra)
-
-	return json.Marshal(fields)
-}
-
 func LoadProject(path string) (Project, error) {
-	raw, err := os.ReadFile(path)
+	project, err := loadPlanningProject(path)
 	if err != nil {
 		return Project{}, err
 	}
-
-	var project Project
-	if err := json.Unmarshal(raw, &project); err != nil {
-		return Project{}, fmt.Errorf("parsing %s: %w", path, err)
+	if project.Version == 2 {
+		return Project{}, errors.New("version 2 execution is not available; use deploy check, plan or migrate; retain version 1 for deployment")
 	}
-	if project.Version != supportedConfigVersion {
-		return Project{}, fmt.Errorf(
-			"%s declares version %d, this deploy understands version %d",
-			path, project.Version, supportedConfigVersion,
-		)
-	}
-
 	return project, nil
 }
 
 // ResolveEnvironment layers an environment's overrides onto the base services. A
 // project with no environments block resolves to its base services as written.
 func (project Project) ResolveEnvironment(environmentName string) (ResolvedProject, error) {
+	if project.Version == 2 && len(project.Environments) == 0 && environmentName != defaultEnvironmentName {
+		return ResolvedProject{}, fmt.Errorf("version 2 environment %q must be declared explicitly", environmentName)
+	}
+	network := project.Network
 	services := maps.Clone(project.Services)
 	if services == nil {
 		services = map[string]Service{}
@@ -245,11 +166,14 @@ func (project Project) ResolveEnvironment(environmentName string) (ResolvedProje
 				environmentName, strings.Join(slices.Sorted(maps.Keys(project.Environments)), ", "),
 			)
 		}
+		if environment.Network != nil {
+			network = environment.Network
+		}
 		for name, override := range environment.Services {
-			services[name] = mergeService(services[name], override)
+			services[name] = mergeService(services[name], override, project.Version)
 		}
 		for name, override := range environment.Release {
-			release[name] = mergeService(release[name], override)
+			release[name] = mergeService(release[name], override, project.Version)
 		}
 	}
 
@@ -264,6 +188,8 @@ func (project Project) ResolveEnvironment(environmentName string) (ResolvedProje
 		Name:               project.Name,
 		GitStorage:         project.GitStorage,
 		Destination:        project.Destination,
+		Destinations:       maps.Clone(project.Destinations),
+		Network:            network,
 		Retention:          retention,
 		BuildOnDestination: project.BuildOnDestination,
 		Notify:             project.Notify,
@@ -275,8 +201,17 @@ func (project Project) ResolveEnvironment(environmentName string) (ResolvedProje
 
 // mergeService overrides field by field rather than replacing the whole service,
 // so an environment can add a host block without restating the build.
-func mergeService(base, override Service) Service {
+func mergeService(base, override Service, version int) Service {
 	merged := base
+	if override.Destination != "" {
+		merged.Destination = override.Destination
+	}
+	if override.Endpoints != nil {
+		merged.Endpoints = mergeEntries(base.Endpoints, override.Endpoints)
+	}
+	if override.Connections != nil {
+		merged.Connections = mergeEntries(base.Connections, override.Connections)
+	}
 
 	if override.Image != "" {
 		merged.Image = override.Image
@@ -293,7 +228,7 @@ func mergeService(base, override Service) Service {
 	if override.Host != nil {
 		merged.Host = override.Host
 	}
-	if len(override.DependsOn) > 0 {
+	if len(override.DependsOn) > 0 || (version == 2 && override.DependsOn != nil) {
 		merged.DependsOn = override.DependsOn
 	}
 	if override.Healthcheck != nil {
@@ -307,141 +242,4 @@ func mergeService(base, override Service) Service {
 	}
 
 	return merged
-}
-
-// Validate reports every problem it finds rather than the first, because fixing
-// a config one error per run is miserable.
-func (resolved ResolvedProject) Validate() error {
-	var problems []error
-	if !validEnvironment(resolved.Environment) {
-		problems = append(problems, errors.New("environment must be a lowercase slug of at most 32 characters"))
-	}
-
-	if !projectIDPattern.MatchString(resolved.ID) {
-		problems = append(problems, fmt.Errorf(
-			"id %q must be 8 hex characters", resolved.ID,
-		))
-	}
-	if resolved.Name == "" {
-		problems = append(problems, errors.New("name is required"))
-	}
-	if len(resolved.Services) == 0 {
-		problems = append(problems, errors.New("no services defined"))
-	}
-	// a notify block with nothing in it is someone who meant to be told and will
-	// not be, which is worse than not configuring it at all
-	if resolved.Notify != nil && resolved.Notify.DiscordWebhookFrom == "" {
-		problems = append(problems, errors.New(
-			"notify needs discordWebhookFrom, naming the variable that holds the webhook url. the url itself does not go in this file",
-		))
-	}
-	// a webhook url here rather than a variable name is the mistake worth
-	// catching, since it commits a credential
-	if resolved.Notify != nil && strings.Contains(resolved.Notify.DiscordWebhookFrom, "://") {
-		problems = append(problems, errors.New(
-			"notify.discordWebhookFrom names the variable holding the webhook, not the webhook itself. putting the url here commits a credential to the repository",
-		))
-	}
-
-	for _, name := range slices.Sorted(maps.Keys(resolved.Services)) {
-		problems = append(problems, validateService(name, resolved.Services[name], resolved)...)
-	}
-	for _, name := range slices.Sorted(maps.Keys(resolved.Release)) {
-		problems = append(problems, validateService(name, resolved.Release[name], resolved)...)
-	}
-
-	return errors.Join(problems...)
-}
-
-func validateService(name string, service Service, resolved ResolvedProject) []error {
-	var problems []error
-
-	if !serviceNamePattern.MatchString(name) {
-		problems = append(problems, fmt.Errorf(
-			"service %q is not a usable docker service name", name,
-		))
-	}
-
-	hasImage := service.Image != ""
-	hasBuild := len(service.Build) > 0
-	switch {
-	case hasImage && hasBuild:
-		problems = append(problems, fmt.Errorf(
-			"service %q sets both image and build, pick one", name,
-		))
-	case !hasImage && !hasBuild:
-		problems = append(problems, fmt.Errorf(
-			"service %q sets neither image nor build", name,
-		))
-	}
-
-	// the build block is worked out here as well as at build time, so a config
-	// that cannot be built is refused by deploy check rather than three steps into
-	// a deploy
-	if hasBuild {
-		if _, _, err := buildPlan(name, service); err != nil {
-			problems = append(problems, err)
-		}
-	}
-
-	if service.Host != nil {
-		problems = append(problems, validateHost(name, service)...)
-	}
-
-	for _, dependency := range slices.Sorted(maps.Keys(service.DependsOn)) {
-		condition := service.DependsOn[dependency]
-		if !slices.Contains(dependsOnConditions, condition) {
-			problems = append(problems, fmt.Errorf(
-				"service %q depends on %q with condition %q, expected one of %s",
-				name, dependency, condition, strings.Join(dependsOnConditions, ", "),
-			))
-		}
-		_, isService := resolved.Services[dependency]
-		_, isReleaseTask := resolved.Release[dependency]
-		if !isService && !isReleaseTask {
-			problems = append(problems, fmt.Errorf(
-				"service %q depends on %q, which this environment does not define",
-				name, dependency,
-			))
-		}
-	}
-
-	return problems
-}
-
-func validateHost(name string, service Service) []error {
-	var problems []error
-
-	if service.Host.Domain == "" {
-		problems = append(problems, fmt.Errorf("service %q has a host block with no domain", name))
-	}
-	if service.Host.Port == 0 {
-		problems = append(problems, fmt.Errorf("service %q has a host block with no port", name))
-	}
-	if service.Host.TunnelTokenFrom == "" {
-		problems = append(problems, fmt.Errorf(
-			"service %q has a host block with no tunnelTokenFrom, which names the env var holding the token rather than the token itself",
-			name,
-		))
-	}
-	if service.IsStateful() {
-		problems = append(problems, fmt.Errorf(
-			"service %q is stateful and cannot be hosted, because a singleton cannot be cut over",
-			name,
-		))
-	}
-	if len(service.Healthcheck) == 0 {
-		problems = append(problems, fmt.Errorf(
-			"service %q is hosted so it needs a healthcheck, otherwise there is no way to know the new container serves before we send it traffic",
-			name,
-		))
-	}
-	if _, publishes := service.Extra["ports"]; publishes {
-		problems = append(problems, fmt.Errorf(
-			"service %q is hosted so it must not publish ports, because two commits cannot both bind the same one",
-			name,
-		))
-	}
-
-	return problems
 }
