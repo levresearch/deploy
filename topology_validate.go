@@ -42,6 +42,13 @@ func hostHint(raw string) string {
 	return host
 }
 
+func (resolved ResolvedProject) destinationHost(name string) string {
+	if identity, observed := resolved.observedHosts[name]; observed {
+		return identity
+	}
+	return hostHint(resolved.Destinations[name])
+}
+
 func (resolved ResolvedProject) validateTopology() error {
 	problems := validateReadiness(resolved)
 	if resolved.Destination != "" {
@@ -77,7 +84,7 @@ func (resolved ResolvedProject) validateTopology() error {
 				problems = append(problems, fmt.Errorf("%s endpoint %s requires a lowercase name, tcp and valid ports", name, endpointName))
 			}
 			if endpoint.HostPort != 0 {
-				key := fmt.Sprintf("%s:%d", hostHint(resolved.Destinations[service.Destination]), endpoint.HostPort)
+				key := fmt.Sprintf("%s:%d", resolved.destinationHost(service.Destination), endpoint.HostPort)
 				if previous, exists := ports[key]; exists {
 					problems = append(problems, fmt.Errorf("host port collision between %s and %s/%s", previous, name, endpointName))
 				}
@@ -113,7 +120,7 @@ func validateConnections(name string, service Service, resolved ResolvedProject)
 			}
 			variables[variable] = true
 		}
-		if hostHint(resolved.Destinations[service.Destination]) != hostHint(resolved.Destinations[provider.Destination]) {
+		if resolved.destinationHost(service.Destination) != resolved.destinationHost(provider.Destination) {
 			if endpoint.HostPort == 0 {
 				problems = append(problems, fmt.Errorf("%s connection %s requires a stable provider hostPort", name, label))
 			}

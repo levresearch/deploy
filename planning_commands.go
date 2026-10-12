@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -10,6 +11,10 @@ import (
 func runPlanning(args []string, command string) int {
 	flags := newFlagSet(command)
 	var context, environment string
+	observe := false
+	if command == "plan" {
+		flags.BoolVar(&observe, "observe", false, "read destination identity, paths and Docker facts over trusted SSH")
+	}
 	stringFlag(flags, &context, "context", "C", ".", "directory containing .deploy.json")
 	stringFlag(flags, &environment, "environment", "e", defaultEnvironmentName, "environment to preview")
 	if proceed, code := parseCommandFlags(flags, args); !proceed {
@@ -19,6 +24,9 @@ func runPlanning(args []string, command string) int {
 	if err != nil {
 		fatal("%v", err)
 		return exitPreconditionNotMet
+	}
+	if observe {
+		return runObservedPlanning(project, context, environment)
 	}
 	if project.Version == 2 {
 		if err := validatePlanningProject(project); err != nil {
@@ -52,6 +60,29 @@ func runPlanning(args []string, command string) int {
 		}
 	}
 	return printPlanningJSON(output)
+}
+
+func runObservedPlanning(project Project, directory, environment string) int {
+	commit, err := ResolveCommit(directory, "HEAD")
+	if err != nil {
+		fatal("%v", err)
+		return exitPreconditionNotMet
+	}
+	if _, err := project.ResolveEnvironment(environment); err != nil {
+		fatal("%v", err)
+		return exitPreconditionNotMet
+	}
+	observations, err := observePlanningProject(context.Background(), project, observeDestination)
+	if err != nil {
+		fatal("%v", err)
+		return exitPreconditionNotMet
+	}
+	plan, err := planObservedTopology(project, environment, commit, observations)
+	if err != nil {
+		fatal("%v", err)
+		return exitPreconditionNotMet
+	}
+	return printPlanningJSON(plan)
 }
 
 func runMigrate(args []string) int {

@@ -10,19 +10,20 @@ import (
 )
 
 type TopologyPlan struct {
-	Version             int                  `json:"version"`
-	Project             string               `json:"project"`
-	Environment         string               `json:"environment"`
-	Commit              string               `json:"commit"`
-	ConfigDigest        string               `json:"configDigest"`
-	ConfigurationSource string               `json:"configurationSource"`
-	ExecutionAvailable  bool                 `json:"executionAvailable"`
-	Destinations        []PlannedDestination `json:"destinations"`
-	Services            []PlannedService     `json:"services"`
-	Waves               [][]string           `json:"readinessWaves"`
-	Connections         []PlannedConnection  `json:"connections"`
-	Network             PlannedNetwork       `json:"network"`
-	Unverified          []string             `json:"unverified"`
+	Observations        map[string]DestinationObservation `json:"observations,omitempty"`
+	Version             int                               `json:"version"`
+	Project             string                            `json:"project"`
+	Environment         string                            `json:"environment"`
+	Commit              string                            `json:"commit"`
+	ConfigDigest        string                            `json:"configDigest"`
+	ConfigurationSource string                            `json:"configurationSource"`
+	ExecutionAvailable  bool                              `json:"executionAvailable"`
+	Destinations        []PlannedDestination              `json:"destinations"`
+	Services            []PlannedService                  `json:"services"`
+	Waves               [][]string                        `json:"readinessWaves"`
+	Connections         []PlannedConnection               `json:"connections"`
+	Network             PlannedNetwork                    `json:"network"`
+	Unverified          []string                          `json:"unverified"`
 }
 
 type PlannedDestination struct {
@@ -112,7 +113,7 @@ func planTopology(resolved ResolvedProject, commit string) (TopologyPlan, error)
 			provider := resolved.Services[connection.Service]
 			endpoint := provider.Endpoints[connection.Endpoint]
 			path := PlannedConnection{Consumer: name, Name: label, Provider: connection.Service, Endpoint: connection.Endpoint, Transport: "docker", Host: connection.Service, Port: endpoint.Port, HostEnv: connection.HostEnv, PortEnv: connection.PortEnv}
-			if hostHint(resolved.Destinations[service.Destination]) != hostHint(resolved.Destinations[provider.Destination]) {
+			if resolved.destinationHost(service.Destination) != resolved.destinationHost(provider.Destination) {
 				path.Transport, path.Host, path.Port = "wireguard", resolved.Network.Peers[provider.Destination].Address, endpoint.HostPort
 				pair := []string{service.Destination, provider.Destination}
 				slices.Sort(pair)
@@ -140,6 +141,10 @@ func planTopology(resolved ResolvedProject, commit string) (TopologyPlan, error)
 }
 
 func validatePlanningProject(project Project) error {
+	return validateObservedProject(project, nil)
+}
+
+func validateObservedProject(project Project, hosts map[string]string) error {
 	names := slices.Sorted(maps.Keys(project.Environments))
 	if len(names) == 0 {
 		names = []string{defaultEnvironmentName}
@@ -150,6 +155,7 @@ func validatePlanningProject(project Project) error {
 		if err != nil {
 			return err
 		}
+		resolved.observedHosts = hosts
 		if err := resolved.Validate(); err != nil {
 			return fmt.Errorf("environment %s: %w", name, err)
 		}

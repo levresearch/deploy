@@ -72,6 +72,7 @@ type Host struct {
 }
 
 type ResolvedProject struct {
+	observedHosts      map[string]string
 	Version            int                `json:"version"`
 	ID                 string             `json:"id"`
 	Name               string             `json:"name"`
