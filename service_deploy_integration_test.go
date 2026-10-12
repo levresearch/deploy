@@ -276,3 +276,90 @@ func TestAFailedCandidateLeavesEveryServiceOnItsRelease(t *testing.T) {
 		t.Fatalf("a redeploy stopped the live api: %v", got)
 	}
 }
+
+func TestTheEverydayCommandsFollowEachServicesRelease(t *testing.T) {
+	dockerAvailable(t)
+	const id = "fb000004"
+	removeDeployment(t, id)
+	repository := newRepository(t)
+	destination := t.TempDir()
+	config := `{"version": 2, "id": "` + id + `", "name": "everyday",
+	  "destinations": {"main": "` + destination + `"},
+	  "services": {
+	    "store": {` + sleeper + `, "destination": "main", "stateful": true, "volumes": ["data:/data"]},
+	    "app": {` + sleeper + `, "destination": "main", "env": ["app.env"]}
+	  }}`
+	commit := commitFile(t, repository, configFileName, config)
+	options := DeployOptions{Context: repository}
+
+	if code, err := RunDeploy(options); code != exitPreconditionNotMet || err == nil || !strings.Contains(err.Error(), "app.env") {
+		t.Fatalf("a missing env file did not stop the deploy: %d %v", code, err)
+	}
+	secret := filepath.Join(t.TempDir(), "app.env")
+	writeFile(t, filepath.Dir(secret), "app.env", "GREETING=hello from the env file\n")
+	if code, err := RunEnvPush(options, secret); code != exitOK || err != nil {
+		t.Fatalf("env push: %d %v", code, err)
+	}
+	if state := recordedState(t, destination, id); state.Generation != 1 || len(state.Services) != 0 {
+		t.Fatalf("env push did not claim the destination per service: %+v", state)
+	}
+	if _, err := os.Stat(operationFile(NewLayout(destination, id))); !os.IsNotExist(err) {
+		t.Fatal("env push left its operation recorded")
+	}
+	if _, err := RunEnvPush(DeployOptions{Context: repository, Destination: destination}, secret); err == nil {
+		t.Fatal("a destination flag was accepted for version 2 env push")
+	}
+
+	if code, err := RunDeploy(options); code != exitOK || err != nil {
+		t.Fatalf("deploy: %d %v", code, err)
+	}
+
+	status := captureStdout(t, func() {
+		if _, err := RunStatus(options); err != nil {
+			t.Fatalf("status: %v", err)
+		}
+	})
+	for _, want := range []string{"everyday", "app", ShortCommit(commit), "store", "shared", "healthy"} {
+		if !strings.Contains(status, want) {
+			t.Errorf("status should mention %q:\n%s", want, status)
+		}
+	}
+	releases := captureStdout(t, func() {
+		if _, err := RunReleases(options); err != nil {
+			t.Fatalf("releases: %v", err)
+		}
+	})
+	if !strings.Contains(releases, "* "+ShortCommit(commit)) || !strings.Contains(releases, "keeping 3 per service") {
+		t.Errorf("releases:\n%s", releases)
+	}
+	listed := captureStdout(t, func() {
+		if _, err := RunList(options); err != nil {
+			t.Fatalf("list: %v", err)
+		}
+	})
+	if !strings.Contains(listed, "everyday") || !strings.Contains(listed, ShortCommit(commit)) || !strings.Contains(listed, "<- this one") {
+		t.Errorf("list:\n%s", listed)
+	}
+
+	if _, err := RunExec(options, "app", []string{"sh", "-c", "test \"$GREETING\" = 'hello from the env file'"}); err != nil {
+		t.Errorf("exec into the app's own release did not see its env file: %v", err)
+	}
+	if _, err := RunExec(options, "store", []string{"sh", "-c", "echo reached > /data/proof.txt"}); err != nil {
+		t.Errorf("exec into the shared stack: %v", err)
+	}
+	if _, err := RunLogs(options, "app", false); err != nil {
+		t.Errorf("logs: %v", err)
+	}
+	if _, err := RunExec(options, "missing", []string{"true"}); err == nil || !strings.Contains(err.Error(), "app, store") {
+		t.Errorf("an unknown service did not list the real ones: %v", err)
+	}
+	if _, err := RunRollback(options, ""); err == nil || !strings.Contains(err.Error(), "not available for version 2 yet") {
+		t.Errorf("rollback should say it is not available yet: %v", err)
+	}
+	if _, err := RunDestroy(options, true, strings.NewReader("everyday\n")); err == nil || !strings.Contains(err.Error(), "not available for version 2 yet") {
+		t.Errorf("destroy should say it is not available yet: %v", err)
+	}
+	if got := runningServices(t, ServiceReleaseProject(id, "app", commit)); !slices.Equal(got, []string{"app"}) {
+		t.Fatalf("a refused destroy touched the app: %v", got)
+	}
+}

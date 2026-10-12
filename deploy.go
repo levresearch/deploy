@@ -308,6 +308,14 @@ func RunDeploy(options DeployOptions) (exitCode int, err error) {
 }
 
 func RunReleases(options DeployOptions) (int, error) {
+	if repositoryPath, isService := isServiceConfig(options); isService {
+		resolved, layout, runner, closeRunner, destination, err := openServiceProject(repositoryPath, options)
+		if err != nil {
+			return exitPreconditionNotMet, err
+		}
+		defer closeRunner()
+		return runServiceReleases(runner, resolved, layout, destination)
+	}
 	startPath := options.Context
 	if startPath == "" {
 		working, err := os.Getwd()
@@ -389,6 +397,9 @@ func RunEnvPush(options DeployOptions, localPath string) (exitCode int, err erro
 	contents, err := os.ReadFile(localPath)
 	if err != nil {
 		return exitPreconditionNotMet, err
+	}
+	if repositoryPath, isService := isServiceConfig(options); isService {
+		return runServiceEnvPush(repositoryPath, options, localPath, contents)
 	}
 
 	startPath := options.Context

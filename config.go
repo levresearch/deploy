@@ -138,7 +138,7 @@ func LoadProject(path string) (Project, error) {
 		return Project{}, err
 	}
 	if project.Version == 2 {
-		return Project{}, errors.New("version 2 execution is not available; use deploy check, plan or migrate; retain version 1 for deployment")
+		return Project{}, errors.New("this command is not available for version 2 yet; version 2 supports deploy, adopt, resolve, status, releases, list, logs, shell, exec and env push")
 	}
 	return project, nil
 }
