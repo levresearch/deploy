@@ -158,3 +158,20 @@ func TestServiceReleaseNamesCannotCollide(t *testing.T) {
 		t.Fatal("deploy's own artifacts were refused")
 	}
 }
+
+func TestDestroyFindsOnlyThisEnvironmentsProjects(t *testing.T) {
+	production := projectsOf("1234abcd")
+	for _, own := range []string{"deploy-1234abcd-shared", "deploy-1234abcd-abcdef1", "deploy-1234abcd-abcdef1-tasks", "deploy-1234abcd_api_abcdef1", "deploy-1234abcd_match-worker_abcdef1"} {
+		if !production.MatchString(own) {
+			t.Errorf("%s was not found", own)
+		}
+	}
+	for _, other := range []string{"deploy-1234abcd-staging-shared", "deploy-1234abcd-staging-abcdef1", "deploy-1234abcd-staging_api_abcdef1", "deploy-1234abcd-abcdef1-shared", "deploy-1234abcd-abcdef1_api_abcdef1", "deploy-1234abcde-shared", "deploy-1234abcd-net", "other-1234abcd-shared"} {
+		if production.MatchString(other) {
+			t.Errorf("%s belongs to someone else", other)
+		}
+	}
+	if staging := projectsOf("1234abcd-staging"); !staging.MatchString("deploy-1234abcd-staging_api_abcdef1") || staging.MatchString("deploy-1234abcd_api_abcdef1") {
+		t.Error("staging matched the wrong projects")
+	}
+}

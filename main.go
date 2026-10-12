@@ -187,11 +187,19 @@ func runRollback(args []string) int {
 	stringFlag(flags, &options.Destination, "destination", "D", "", "where the project gets deployed")
 	stringFlag(flags, &options.Environment, "environment", "e", defaultEnvironmentName, "environment to resolve")
 	flags.BoolVar(&options.ForceUnlock, "force-unlock", false, "break a stale deploy.lock")
+	services := ""
+	flags.StringVar(&services, "service", "", "version 2: roll back only these services, comma separated")
 	if keepGoing, exitCode := parseCommandFlags(flags, args); !keepGoing {
 		return exitCode
 	}
+	var only []string
+	for _, service := range strings.Split(services, ",") {
+		if service = strings.TrimSpace(service); service != "" {
+			only = append(only, service)
+		}
+	}
 
-	exitCode, err := RunRollback(options, requested)
+	exitCode, err := RunRollback(options, requested, only...)
 	if err != nil {
 		fatal("%v", err)
 	}
@@ -349,8 +357,9 @@ usage:
   deploy env push <file>  upload an env file to the destination
   deploy dwh [<url>]      set the discord webhook for this project, or
                           say whether one is set
-  deploy rollback [<commit>]
-                          activate a retained release, default the previous one
+  deploy rollback [<commit>] [--service a,b]
+                          activate a retained release, default the previous one;
+                          version 2 rolls back each service, or only those named
   deploy resolve <id>     clear an operation that did not finish, after
                           checking what it changed
   deploy adopt [--write]  record a version 1 deployment per service so a

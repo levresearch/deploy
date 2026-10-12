@@ -2,7 +2,6 @@ package main
 
 import (
 	"bufio"
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -48,6 +47,9 @@ type DestroyPlan struct {
 	Volumes         []string
 	RemoveVolumes   bool
 	KeptDirectories []string
+	// Projects is set for a per-service deployment: every compose project deploy
+	// created for it, found by name on the Docker engine
+	Projects []string
 }
 
 func PlanDestroy(
@@ -93,7 +95,11 @@ func PlanDestroy(
 func (plan DestroyPlan) Describe(out io.Writer) {
 	fmt.Fprintf(out, "about to destroy %s (%s) at %s\n\n", plan.ProjectName, plan.ProjectID, plan.Root)
 
-	fmt.Fprintf(out, "  stopping   %d release stack(s), and %s\n", len(plan.Releases), plan.SharedProject)
+	if plan.Projects != nil {
+		fmt.Fprintf(out, "  stopping   %d compose project(s): %s\n", len(plan.Projects), strings.Join(plan.Projects, ", "))
+	} else {
+		fmt.Fprintf(out, "  stopping   %d release stack(s), and %s\n", len(plan.Releases), plan.SharedProject)
+	}
 	fmt.Fprintf(out, "  removing   images matching deploy-%s/*\n", plan.ProjectID)
 	fmt.Fprintf(out, "  removing   network %s\n", plan.Network)
 	fmt.Fprintf(out, "  removing   %s/releases and %s/shared\n", plan.Root, plan.Root)
@@ -146,7 +152,9 @@ func RunDestroy(options DeployOptions, removeVolumes bool, confirmation io.Reade
 	}
 	defer closeRunner()
 	if resolved.Version == 2 {
-		return exitPreconditionNotMet, errors.New("destroy is not available for version 2 yet; it would miss each service's own release")
+		closeRunner()
+		repositoryPath, _ := isServiceConfig(options)
+		return runServiceDestroy(repositoryPath, options, removeVolumes, confirmation)
 	}
 
 	projectName = resolved.Name
@@ -232,6 +240,15 @@ func destroyStartPath(options DeployOptions) string {
 // ExecuteDestroy takes the plan rather than working it out again, so what gets
 // removed is exactly what was shown and confirmed.
 func ExecuteDestroy(runner Runner, layout Layout, plan DestroyPlan) error {
+	// compose finds a project's containers by its label, so no file is needed
+	for _, project := range plan.Projects {
+		if output, err := runner.Run([]string{"docker", "compose", "--project-name", project, "down"}); err != nil {
+			return fmt.Errorf("stopping %s: %s", project, firstLine(output))
+		}
+	}
+	if plan.Projects != nil {
+		fmt.Printf("  stopped %d compose project(s)\n", len(plan.Projects))
+	}
 	for _, release := range plan.Releases {
 		stopRelease(runner, plan.ProjectID, release, path.Join(layout.Release(release), composeFileName))
 	}
@@ -262,7 +279,7 @@ func ExecuteDestroy(runner Runner, layout Layout, plan DestroyPlan) error {
 			return fmt.Errorf("removing %s: %w", directory, err)
 		}
 	}
-	for _, file := range []string{layout.StateFile()} {
+	for _, file := range []string{layout.StateFile(), layout.ServiceStateFile()} {
 		if err := runner.RemoveAll(file); err != nil {
 			return fmt.Errorf("removing %s: %w", file, err)
 		}

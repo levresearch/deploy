@@ -353,13 +353,143 @@ func TestTheEverydayCommandsFollowEachServicesRelease(t *testing.T) {
 	if _, err := RunExec(options, "missing", []string{"true"}); err == nil || !strings.Contains(err.Error(), "app, store") {
 		t.Errorf("an unknown service did not list the real ones: %v", err)
 	}
-	if _, err := RunRollback(options, ""); err == nil || !strings.Contains(err.Error(), "not available for version 2 yet") {
-		t.Errorf("rollback should say it is not available yet: %v", err)
+	if _, err := RunRollback(options, ""); err == nil || !strings.Contains(err.Error(), "nothing to roll back") {
+		t.Errorf("a first release was rolled back: %v", err)
 	}
-	if _, err := RunDestroy(options, true, strings.NewReader("everyday\n")); err == nil || !strings.Contains(err.Error(), "not available for version 2 yet") {
-		t.Errorf("destroy should say it is not available yet: %v", err)
+	if _, err := RunDestroy(options, true, strings.NewReader("not the name\n")); err == nil {
+		t.Error("destroy ran without the project name")
 	}
 	if got := runningServices(t, ServiceReleaseProject(id, "app", commit)); !slices.Equal(got, []string{"app"}) {
-		t.Fatalf("a refused destroy touched the app: %v", got)
+		t.Fatalf("an unconfirmed destroy touched the app: %v", got)
+	}
+}
+
+func TestEachServiceRollsBackAndReusesItsOwnImage(t *testing.T) {
+	dockerAvailable(t)
+	t.Parallel()
+	const id = "fb000005"
+	removeDeployment(t, id)
+	repository := newRepository(t)
+	destination := t.TempDir()
+	check := `"command": ["sh", "-c", "sleep 600"], "healthcheck": {"command": ["CMD", "true"], "interval": "1s", "retries": 5}`
+	writeFile(t, repository, "api/Dockerfile", "FROM busybox:latest\nCOPY api/version /version\n")
+	writeFile(t, repository, "api/version", "one")
+	writeFile(t, repository, "worker/Dockerfile", "FROM busybox:latest\nCOPY worker/version /version\n")
+	writeFile(t, repository, "worker/version", "one")
+	first := commitFile(t, repository, configFileName, `{"version": 2, "id": "`+id+`", "name": "rolling",
+	  "destinations": {"main": "`+destination+`"},
+	  "services": {
+	    "api": {"destination": "main", "build": "api/Dockerfile", `+check+`},
+	    "worker": {"destination": "main", "build": "worker/Dockerfile", `+check+`}
+	  }}`)
+	options := DeployOptions{Context: repository}
+	if code, err := RunDeploy(options); code != exitOK || err != nil {
+		t.Fatalf("first deploy: %d %v", code, err)
+	}
+
+	second := commitFile(t, repository, "api/version", "two")
+	affected := options
+	affected.Affected = true
+	if code, err := RunDeploy(affected); code != exitOK || err != nil {
+		t.Fatalf("--affected deploy: %d %v", code, err)
+	}
+	if imageID(t, ImageTag(id, "worker", second)) != imageID(t, ImageTag(id, "worker", first)) {
+		t.Error("the worker was rebuilt although nothing of it changed")
+	}
+	if imageID(t, ImageTag(id, "api", second)) == imageID(t, ImageTag(id, "api", first)) {
+		t.Error("the api was reused although its directory changed")
+	}
+
+	if code, err := RunRollback(options, "", "api"); code != exitOK || err != nil {
+		t.Fatalf("rolling back the api: %d %v", code, err)
+	}
+	state := recordedState(t, destination, id)
+	if state.Services["api"].Current.Commit != ShortCommit(first) || state.Services["api"].Previous.Commit != ShortCommit(second) || state.Services["worker"].Current.Commit != ShortCommit(second) {
+		t.Fatalf("a single-service rollback moved the wrong things: %+v", state.Services)
+	}
+	if got := runningServices(t, ServiceReleaseProject(id, "api", first)); !slices.Equal(got, []string{"api"}) {
+		t.Fatalf("the api did not return to its first release: %v", got)
+	}
+	if got := runningServices(t, ServiceReleaseProject(id, "api", second)); len(got) != 0 {
+		t.Fatalf("the api release rolled away from still runs: %v", got)
+	}
+	if got := runningServices(t, ServiceReleaseProject(id, "worker", second)); !slices.Equal(got, []string{"worker"}) {
+		t.Fatalf("the worker moved: %v", got)
+	}
+
+	if code, err := RunRollback(options, ""); code != exitOK || err != nil {
+		t.Fatalf("rolling back every service: %d %v", code, err)
+	}
+	state = recordedState(t, destination, id)
+	if state.Services["api"].Current.Commit != ShortCommit(second) || state.Services["worker"].Current.Commit != ShortCommit(first) {
+		t.Fatalf("each service should return to its own previous release: %+v", state.Services)
+	}
+	if _, err := RunRollback(options, "abcdef0"); err == nil || !strings.Contains(err.Error(), "nothing to roll back") {
+		t.Fatalf("an unknown commit was accepted: %v", err)
+	}
+	if _, err := RunRollback(options, "abcdef0", "api"); err == nil || !strings.Contains(err.Error(), "these still are") {
+		t.Fatalf("an unknown commit for one service did not list what is available: %v", err)
+	}
+	if _, err := os.Stat(operationFile(NewLayout(destination, id))); !os.IsNotExist(err) {
+		t.Fatal("a rollback left its operation recorded")
+	}
+}
+
+func TestDestroyRemovesOneEnvironmentsServicesAndNothingElse(t *testing.T) {
+	dockerAvailable(t)
+	t.Parallel()
+	const id = "fb000006"
+	removeDeployment(t, id)
+	repository := newRepository(t)
+	destination := t.TempDir()
+	commit := commitFile(t, repository, configFileName, `{"version": 2, "id": "`+id+`", "name": "ending",
+	  "destinations": {"main": "`+destination+`"},
+	  "environments": {"production": {}, "staging": {}},
+	  "services": {
+	    "store": {`+sleeper+`, "destination": "main", "stateful": true, "volumes": ["data:/data"]},
+	    "app": {`+sleeper+`, "destination": "main"}
+	  }}`)
+	production := DeployOptions{Context: repository, Environment: "production"}
+	staging := DeployOptions{Context: repository, Environment: "staging"}
+	for _, options := range []DeployOptions{production, staging} {
+		if code, err := RunDeploy(options); code != exitOK || err != nil {
+			t.Fatalf("deploy %s: %d %v", options.Environment, code, err)
+		}
+	}
+	// a candidate an interrupted deploy left behind is destroyed too
+	leftover := ServiceReleaseProject(id, "app", "abcdef0")
+	if output, err := exec.Command("docker", "run", "-d", "--label", "com.docker.compose.project="+leftover, "--label", "com.docker.compose.service=app", "--name", leftover+"-app-1", "busybox:latest", "sleep", "600").CombinedOutput(); err != nil {
+		t.Fatalf("starting a leftover: %v %s", err, output)
+	}
+
+	if code, err := RunDestroy(production, false, strings.NewReader("ending\n")); code != exitOK || err != nil {
+		t.Fatalf("destroy: %d %v", code, err)
+	}
+	for _, project := range []string{ServiceReleaseProject(id, "app", commit), SharedProjectName(id), leftover} {
+		if got := runningServices(t, project); len(got) != 0 {
+			t.Fatalf("%s survived destroy: %v", project, got)
+		}
+	}
+	stagingID := id + "-staging"
+	if got := runningServices(t, ServiceReleaseProject(stagingID, "app", commit)); !slices.Equal(got, []string{"app"}) {
+		t.Fatalf("destroying production stopped staging: %v", got)
+	}
+	if got := runningServices(t, SharedProjectName(stagingID)); !slices.Equal(got, []string{"store"}) {
+		t.Fatalf("destroying production stopped the staging store: %v", got)
+	}
+	if output, err := exec.Command("docker", "volume", "inspect", VolumeName(id, "data")).CombinedOutput(); err != nil {
+		t.Fatalf("destroy without --volumes removed the data: %s", output)
+	}
+	layout := NewLayout(destination, id)
+	for _, gone := range []string{layout.ServiceStateFile(), layout.StateFile(), layout.Releases()} {
+		if _, err := os.Stat(gone); !os.IsNotExist(err) {
+			t.Fatalf("%s survived destroy", gone)
+		}
+	}
+	if _, err := os.Stat(operationFile(layout)); !os.IsNotExist(err) {
+		t.Fatal("destroy left its operation recorded")
+	}
+	if code, err := RunDeploy(production); code != exitOK || err != nil {
+		t.Fatalf("deploying again after destroy: %d %v", code, err)
 	}
 }

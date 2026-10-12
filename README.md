@@ -358,7 +358,7 @@ logs, shell and exec work out which stack the service is in themselves, you neve
 
 ### version 2
 
-Version 2 makes every service and release task choose a named destination. This release supports offline validation, planning, a migration preview and, for a config with exactly one destination, `deploy`, `deploy adopt`, `deploy resolve`, `env push`, `status`, `releases`, `list`, `logs`, `shell` and `exec`. Rollback and destroy still require version 1. Several destinations, published endpoint host ports and connections across destinations wait for managed networking.
+Version 2 makes every service and release task choose a named destination. This release supports offline validation, planning, a migration preview and, for a config with exactly one destination, every project command: `deploy` (including `--affected`), `deploy adopt`, `deploy resolve`, `rollback`, `destroy`, `env push`, `status`, `releases`, `list`, `logs`, `shell` and `exec`. Several destinations, published endpoint host ports and connections across destinations wait for managed networking.
 
 ```json
 {
@@ -434,7 +434,11 @@ A release task whose last run is `indeterminate` blocks the next deploy. The int
 
 A destination that holds a version 1 deployment is refused until it is adopted. `deploy adopt -C <directory>` previews what it would record: each service's live and previous commit stack, the shared stack for stateful services, and services that the live stack runs but the config no longer names, which are kept on record and left running. `deploy adopt --write` records it under the lock and an operation record. Nothing is restarted, renamed or moved; the next version 2 deploy moves each configured service out of its commit stack one at a time, and stateful volumes keep their names and contents.
 
-`--destination`, `--affected` and `--force-unlock` are refused with version 2.
+`--affected` compares each service with the commit it is actually running, so services that move independently are each judged against their own release, and a release task against its last completed run. `--destination` and `--force-unlock` are refused with version 2.
+
+`deploy rollback` returns every stateless service to its own previous release, or `--service api,worker` only those. `deploy rollback <commit>` moves each service that ran that commit, and with `--service` the named ones must have it. The retained release is started from its compose file, whether its own project or a version 1 commit stack, must become healthy, and then takes over exactly as a deploy candidate does; one that will not start is removed and nothing serving is touched. Stateful services and data are never rolled back. Rolling back again returns each service to where it was.
+
+`deploy destroy` finds every compose project deploy created for this environment by name on the Docker engine, including candidates and task runs an interrupted deploy left behind, and never another environment's. It keeps the typed confirmation, re-plans under the lock and refuses if anything changed while you were confirming, and records the operation. It removes the projects, images, network, release directories and both state files; volumes and env files stay unless `--volumes` is given.
 
 The everyday commands follow each service's recorded release: `status` shows every service with its release, previous release and container status, including services the config no longer names; `releases` lists retained releases per service and each release task's last run; `logs`, `shell` and `exec` reach a service in whichever project serves it, its own release, a version 1 commit stack or the shared stack; `list` shows every project on the destination, with the live commits of a per-service deployment. `env push` takes the destination lock and records the operation like a deploy, and on a destination that was never deployed it claims the root per service. Commands that read state refuse a version 1 deployment that was not adopted, and state recorded for another project, environment or destination.
 

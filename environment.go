@@ -47,6 +47,10 @@ func checkEnvironment(runner stateReader, resolved ResolvedProject, layout Layou
 }
 
 func readEnvironmentState(runner stateReader, layout Layout) (State, error) {
+	// a per-service deployment records its environment in services.json
+	if recorded, found, err := ReadServiceState(runner, layout); err != nil || found {
+		return State{Name: recorded.Name, Environment: recorded.Environment}, err
+	}
 	state, err := ReadState(runner, layout)
 	if err != nil {
 		return state, err
