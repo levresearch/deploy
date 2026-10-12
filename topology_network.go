@@ -31,7 +31,7 @@ func validateManagedNetwork(resolved ResolvedProject) []error {
 	hosts := map[string]NetworkPeer{}
 	for _, name := range slices.Sorted(maps.Keys(network.Peers)) {
 		peer := network.Peers[name]
-		destination, exists := resolved.Destinations[name]
+		_, exists := resolved.Destinations[name]
 		if !exists {
 			problems = append(problems, fmt.Errorf("network peer %s is not a destination", name))
 			continue
@@ -40,7 +40,7 @@ func validateManagedNetwork(resolved ResolvedProject) []error {
 		if err != nil || !address.Is4() || !prefix.Contains(address) || address == prefix.Addr() || !prefix.Contains(address.Next()) {
 			problems = append(problems, fmt.Errorf("peer %s needs a usable IPv4 address in network.cidr", name))
 		}
-		host := hostHint(destination)
+		host := resolved.destinationHost(name)
 		if previous, used := addresses[address]; used && previous != host {
 			problems = append(problems, fmt.Errorf("peer %s duplicates a private address", name))
 		}
@@ -74,7 +74,7 @@ func validateEnvironmentNetworks(environments []ResolvedProject) error {
 			}
 			for firstName, a := range first.Network.Peers {
 				for secondName, b := range second.Network.Peers {
-					if hostHint(first.Destinations[firstName]) != hostHint(second.Destinations[secondName]) {
+					if first.destinationHost(firstName) != second.destinationHost(secondName) {
 						continue
 					}
 					one, _ := netip.ParsePrefix(first.Network.CIDR)

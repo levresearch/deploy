@@ -12,7 +12,8 @@ import (
 	"time"
 )
 
-func TestSSHLockLifetime(t *testing.T) {
+func newSSHTestRunner(t *testing.T) (*SSHRunner, string, int) {
+	t.Helper()
 	if testing.Short() {
 		t.Skip("isolated ssh daemon runs in the full suite")
 	}
@@ -82,6 +83,11 @@ func TestSSHLockLifetime(t *testing.T) {
 		t.Fatalf("test ssh connection: %v %s", err, output)
 	}
 	t.Cleanup(runner.Close)
+	return runner, directory, port
+}
+
+func TestSSHLockLifetime(t *testing.T) {
+	runner, directory, _ := newSSHTestRunner(t)
 	layout := NewLayout(filepath.Join(directory, "destination"), "abcd1234")
 	lock, err := AcquireLock(runner, layout, "aaaaaaa", false)
 	if err != nil {
