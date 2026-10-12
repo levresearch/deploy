@@ -189,7 +189,7 @@ func TestTopologyStrictDecoding(t *testing.T) {
 			t.Fatalf("want %s, got %v", replacement.want, err)
 		}
 	}
-	if _, err := LoadProject(writeConfig(t, topologyFixture)); err == nil || !strings.Contains(err.Error(), "execution is not available") {
+	if _, err := LoadProject(writeConfig(t, topologyFixture)); err == nil || !strings.Contains(err.Error(), "not available for version 2 yet") {
 		t.Fatal(err)
 	}
 }

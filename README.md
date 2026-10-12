@@ -358,7 +358,7 @@ logs, shell and exec work out which stack the service is in themselves, you neve
 
 ### version 2
 
-Version 2 makes every service and release task choose a named destination. This release supports offline validation, planning, a migration preview, `deploy` and `deploy adopt` for a config with exactly one destination, and `deploy resolve`. Rollback, status, releases, logs, shell, exec, env push and destroy still require version 1, so push env files before switching a project's config to version 2. Several destinations, published endpoint host ports and connections across destinations wait for managed networking.
+Version 2 makes every service and release task choose a named destination. This release supports offline validation, planning, a migration preview and, for a config with exactly one destination, `deploy`, `deploy adopt`, `deploy resolve`, `env push`, `status`, `releases`, `list`, `logs`, `shell` and `exec`. Rollback and destroy still require version 1. Several destinations, published endpoint host ports and connections across destinations wait for managed networking.
 
 ```json
 {
@@ -435,6 +435,8 @@ A release task whose last run is `indeterminate` blocks the next deploy. The int
 A destination that holds a version 1 deployment is refused until it is adopted. `deploy adopt -C <directory>` previews what it would record: each service's live and previous commit stack, the shared stack for stateful services, and services that the live stack runs but the config no longer names, which are kept on record and left running. `deploy adopt --write` records it under the lock and an operation record. Nothing is restarted, renamed or moved; the next version 2 deploy moves each configured service out of its commit stack one at a time, and stateful volumes keep their names and contents.
 
 `--destination`, `--affected` and `--force-unlock` are refused with version 2.
+
+The everyday commands follow each service's recorded release: `status` shows every service with its release, previous release and container status, including services the config no longer names; `releases` lists retained releases per service and each release task's last run; `logs`, `shell` and `exec` reach a service in whichever project serves it, its own release, a version 1 commit stack or the shared stack; `list` shows every project on the destination, with the live commits of a per-service deployment. `env push` takes the destination lock and records the operation like a deploy, and on a destination that was never deployed it claims the root per service. Commands that read state refuse a version 1 deployment that was not adopted, and state recorded for another project, environment or destination.
 
 ### managed-network experiments
 

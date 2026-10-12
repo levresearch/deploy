@@ -60,6 +60,24 @@ func LocateService(
 	}, nil
 }
 
+// locateService finds a running service through whichever state the
+// deployment keeps.
+func locateService(runner Runner, resolved ResolvedProject, layout Layout, serviceName string) (ServiceLocation, error) {
+	if resolved.Version == 2 {
+		state, err := inspectedServiceState(runner, resolved, layout)
+		if err != nil {
+			return ServiceLocation{}, err
+		}
+		return locateRecordedService(resolved, layout, state, serviceName)
+	}
+	state, err := ReadState(runner, layout)
+	if err != nil {
+		return ServiceLocation{}, err
+	}
+
+	return LocateService(resolved, layout, state, serviceName)
+}
+
 // ContainerStatus is what docker reports for one container, read through the
 // compose project label so no compose file has to be found first.
 type ContainerStatus struct {
@@ -98,6 +116,9 @@ func containerStatuses(runner Runner, projectName string) ([]ContainerStatus, er
 // openProject is the preamble every one of these commands shares. Read only, so
 // it never takes the lock.
 func openProject(options DeployOptions) (ResolvedProject, Layout, Runner, func(), Destination, error) {
+	if repositoryPath, isService := isServiceConfig(options); isService {
+		return openServiceProject(repositoryPath, options)
+	}
 	startPath := options.Context
 	if startPath == "" {
 		working, err := os.Getwd()
@@ -152,6 +173,9 @@ func RunStatus(options DeployOptions) (int, error) {
 		return exitPreconditionNotMet, err
 	}
 	defer closeRunner()
+	if resolved.Version == 2 {
+		return runServiceStatus(runner, resolved, layout, destination)
+	}
 
 	state, err := ReadState(runner, layout)
 	if err != nil {
@@ -231,12 +255,7 @@ func RunLogs(options DeployOptions, serviceName string, follow bool) (int, error
 	}
 	defer closeRunner()
 
-	state, err := ReadState(runner, layout)
-	if err != nil {
-		return exitPreconditionNotMet, err
-	}
-
-	location, err := LocateService(resolved, layout, state, serviceName)
+	location, err := locateService(runner, resolved, layout, serviceName)
 	if err != nil {
 		return exitPreconditionNotMet, err
 	}
@@ -282,12 +301,7 @@ func runInsideContainer(options DeployOptions, serviceName string, command []str
 	}
 	defer closeRunner()
 
-	state, err := ReadState(runner, layout)
-	if err != nil {
-		return exitPreconditionNotMet, err
-	}
-
-	location, err := LocateService(resolved, layout, state, serviceName)
+	location, err := locateService(runner, resolved, layout, serviceName)
 	if err != nil {
 		return exitPreconditionNotMet, err
 	}
@@ -329,8 +343,7 @@ func RunList(options DeployOptions) (int, error) {
 	}
 
 	type entry struct {
-		id    string
-		state State
+		id, name, environment, release, deployed string
 	}
 
 	var found []entry
@@ -338,11 +351,11 @@ func RunList(options DeployOptions) (int, error) {
 		if !validRuntimeID(projectID) {
 			continue
 		}
-		state, err := ReadState(runner, NewLayout(destination.Path, projectID))
-		if err != nil || state.Current == "" {
+		name, environment, release, deployed, recorded := listedProject(runner, destination.Path, projectID)
+		if !recorded {
 			continue
 		}
-		found = append(found, entry{id: projectID, state: state})
+		found = append(found, entry{id: projectID, name: name, environment: environment, release: release, deployed: deployed})
 	}
 
 	if len(found) == 0 {
@@ -352,7 +365,7 @@ func RunList(options DeployOptions) (int, error) {
 
 	fmt.Printf("%-14s %-10s %-12s %-9s %s\n", "PROJECT", "ID", "ENVIRONMENT", "RELEASE", "DEPLOYED")
 	for _, project := range found {
-		name := project.state.Name
+		name := project.name
 		if name == "" {
 			name = "(unnamed)"
 		}
@@ -361,13 +374,8 @@ func RunList(options DeployOptions) (int, error) {
 			here = "  <- this one"
 		}
 
-		deployed := "unknown"
-		if !project.state.UpdatedAt.IsZero() {
-			deployed = project.state.UpdatedAt.Format("2006-01-02 15:04")
-		}
-
 		fmt.Printf("%-14s %-10s %-12s %-9s %s%s\n",
-			name, project.id, project.state.Environment, project.state.Current, deployed, here)
+			name, project.id, project.environment, project.release, project.deployed, here)
 	}
 
 	return exitOK, nil
