@@ -82,5 +82,8 @@ jobs:
           sudo apt-get install -y openssh-server
           sudo mkdir -p /run/sshd
 
+      # -v streams each test as it finishes; without it this step prints nothing
+      # for its whole run and looks hung. go's own timeout sits under the job's
+      # so a real hang ends with goroutine stacks instead of a silent kill.
       - name: full test suite
-        run: go test -timeout 25m ./...
+        run: go test -v -timeout 20m ./...
