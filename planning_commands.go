@@ -82,6 +82,24 @@ func runObservedPlanning(project Project, directory, environment string) int {
 		fatal("%v", err)
 		return exitPreconditionNotMet
 	}
+	resolved, err := project.ResolveEnvironment(environment)
+	if err != nil {
+		fatal("%v", err)
+		return exitPreconditionNotMet
+	}
+	readers := map[string]stateReader{}
+	for name := range observations {
+		destination, err := topologyDestination(project.Destinations[name])
+		if err != nil {
+			fatal("%v", err)
+			return exitPreconditionNotMet
+		}
+		readers[name] = observedReader{ctx: context.Background(), destination: destination}
+	}
+	if err := applyRecordedState(&plan, resolved, readers); err != nil {
+		fatal("%v", err)
+		return exitPreconditionNotMet
+	}
 	return printPlanningJSON(plan)
 }
 
