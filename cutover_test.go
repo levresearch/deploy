@@ -433,6 +433,7 @@ func TestTheSharedStackStartsForTunnelsEvenWithNothingStateful(t *testing.T) {
 // be placed and recorded so that adding an app later is an ordinary deploy.
 func TestAProjectOfOnlyStatefulServicesDeploys(t *testing.T) {
 	dockerAvailable(t)
+	t.Parallel()
 
 	repository := newRepository(t)
 	writeFile(t, repository, configFileName, `{

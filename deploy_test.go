@@ -351,6 +351,10 @@ func TestBuildPlanReadsEveryFormOfBuildBlock(t *testing.T) {
 	}
 }
 
+// container tests that own a unique project id, temp destination and no fixed
+// host port call t.Parallel right after this. tests that capture stdout, set
+// env vars or change package variables must stay sequential, because go runs
+// every sequential test before releasing the parallel ones.
 func dockerAvailable(t *testing.T) {
 	t.Helper()
 
@@ -364,6 +368,7 @@ func dockerAvailable(t *testing.T) {
 
 func TestDeployEndToEnd(t *testing.T) {
 	dockerAvailable(t)
+	t.Parallel()
 
 	repository := newRepository(t)
 	writeFile(t, repository, "Dockerfile", "FROM busybox:latest\nCOPY marker.txt /marker.txt\nCMD [\"sh\", \"-c\", \"sleep 300\"]\n")
@@ -525,6 +530,7 @@ func TestAnUnreachableDestinationFailsBeforeAnythingIsPlaced(t *testing.T) {
 // four real deploys rather than asserting on the arithmetic alone.
 func TestRepeatedDeploysRetainThreeReleasesAndPruneTheOldest(t *testing.T) {
 	dockerAvailable(t)
+	t.Parallel()
 
 	repository := newRepository(t)
 	writeFile(t, repository, configFileName, `{

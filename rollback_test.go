@@ -202,6 +202,7 @@ func TestPruningStillProtectsBothReleasesAfterARollback(t *testing.T) {
 
 func TestRollbackRestoresThePreviousReleaseForReal(t *testing.T) {
 	dockerAvailable(t)
+	t.Parallel()
 
 	repository := newRepository(t)
 	writeFile(t, repository, configFileName, `{
@@ -300,6 +301,7 @@ func TestRollbackRestoresThePreviousReleaseForReal(t *testing.T) {
 
 func TestRollbackToAPrunedReleaseFailsWithoutTouchingAnything(t *testing.T) {
 	dockerAvailable(t)
+	t.Parallel()
 
 	repository := newRepository(t)
 	writeFile(t, repository, configFileName, `{
@@ -361,6 +363,7 @@ func TestRollbackToAPrunedReleaseFailsWithoutTouchingAnything(t *testing.T) {
 // leaves its predecessor running and a small box fills up with old stacks.
 func TestADeployStopsTheReleaseItReplaces(t *testing.T) {
 	dockerAvailable(t)
+	t.Parallel()
 
 	repository := newRepository(t)
 	writeFile(t, repository, configFileName, `{
@@ -446,6 +449,7 @@ func TestAHostedProjectTakesTheCutoverPath(t *testing.T) {
 // started. Running deploy twice is an ordinary thing to do after a hiccup.
 func TestRedeployingTheSameCommitLeavesItRunning(t *testing.T) {
 	dockerAvailable(t)
+	t.Parallel()
 
 	repository := newRepository(t)
 	writeFile(t, repository, configFileName, `{

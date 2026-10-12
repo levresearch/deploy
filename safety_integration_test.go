@@ -107,6 +107,7 @@ func TestEnvironmentIsolationAndStatefulUpgrade(t *testing.T) {
 
 func TestReusedImagesSurvivePruningAndRollback(t *testing.T) {
 	dockerAvailable(t)
+	t.Parallel()
 	const id = "dd000032"
 	repository := newAffectedRepository(t, id)
 	t.Cleanup(func() { removeProjectImages(LocalRunner{}, id) })

@@ -245,6 +245,7 @@ func TestAChangedSharedStackRendersDifferently(t *testing.T) {
 // project name the second deploy would come up against an empty database.
 func TestDataSurvivesASecondDeploy(t *testing.T) {
 	dockerAvailable(t)
+	t.Parallel()
 
 	repository := newRepository(t)
 	writeFile(t, repository, configFileName, `{
@@ -345,6 +346,7 @@ func TestDataSurvivesASecondDeploy(t *testing.T) {
 // directory would strand them, and the compose file naming them goes with it.
 func TestPruningStopsTheContainersOfThePrunedRelease(t *testing.T) {
 	dockerAvailable(t)
+	t.Parallel()
 
 	repository := newRepository(t)
 	writeFile(t, repository, configFileName, `{

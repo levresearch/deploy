@@ -84,6 +84,7 @@ func TestUnwindAFailedDeployReleasesTheLock(t *testing.T) {
 // down, and whatever was serving before is untouched.
 func TestUnwindAnUnhealthyStackIsTornDownAndThePreviousOneSurvives(t *testing.T) {
 	dockerAvailable(t)
+	t.Parallel()
 
 	repository := newRepository(t)
 	const config = `{
@@ -160,6 +161,7 @@ func TestUnwindAnUnhealthyStackIsTornDownAndThePreviousOneSurvives(t *testing.T)
 // needed rather than that the deploy failed.
 func TestUnwindAfterCutoverReportsRatherThanRollingBack(t *testing.T) {
 	dockerAvailable(t)
+	t.Parallel()
 
 	repository := newRepository(t)
 	writeFile(t, repository, configFileName, `{
