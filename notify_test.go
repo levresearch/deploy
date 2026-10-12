@@ -814,7 +814,7 @@ func TestStagingIsAnnouncedBeforeTheSlowPartRatherThanAfterIt(t *testing.T) {
 
 	commit := commitFile(t, repository, "one.txt", "first")
 	t.Cleanup(func() {
-		exec.Command("docker", "compose", "--project-name", ProjectName("dd000019", commit)).Run()
+		exec.Command("docker", "compose", "--project-name", ProjectName("dd000019", commit), "down").Run()
 	})
 	if _, err := RunDeploy(options); err != nil {
 		t.Fatalf("the deploy should succeed: %v", err)

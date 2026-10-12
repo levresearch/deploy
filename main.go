@@ -1,11 +1,9 @@
 package main
 
 import (
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
-	"io/fs"
 	"os"
 	"slices"
 	"strings"
@@ -31,6 +29,8 @@ var subcommands map[string]func([]string) int
 func init() {
 	subcommands = map[string]func([]string) int{
 		"check":    runCheck,
+		"plan":     func(args []string) int { return runPlanning(args, "plan") },
+		"migrate":  runMigrate,
 		"releases": runReleases,
 		"env":      runEnv,
 		"rollback": runRollback,
@@ -239,42 +239,7 @@ func runReleases(args []string) int {
 }
 
 func runCheck(args []string) int {
-	flags := newFlagSet("check")
-	environment := new(string)
-	stringFlag(flags, environment, "environment", "e", defaultEnvironmentName, "environment to resolve")
-	if keepGoing, exitCode := parseCommandFlags(flags, args); !keepGoing {
-		return exitCode
-	}
-
-	project, err := LoadProject(configFileName)
-	if errors.Is(err, fs.ErrNotExist) {
-		fatal("no %s in this directory, so there is nothing to check", configFileName)
-		return exitPreconditionNotMet
-	}
-	if err != nil {
-		fatal("%v", err)
-		return exitPreconditionNotMet
-	}
-
-	resolved, err := project.ResolveEnvironment(*environment)
-	if err != nil {
-		fatal("%v", err)
-		return exitPreconditionNotMet
-	}
-
-	if err := resolved.Validate(); err != nil {
-		fatal("%s is not valid:\n  %s", configFileName, strings.ReplaceAll(err.Error(), "\n", "\n  "))
-		return exitPreconditionNotMet
-	}
-
-	printed, err := json.MarshalIndent(resolved, "", "  ")
-	if err != nil {
-		fatal("%v", err)
-		return exitPreconditionNotMet
-	}
-	fmt.Println(string(printed))
-
-	return exitOK
+	return runPlanning(args, "check")
 }
 
 func newFlagSet(name string) *flag.FlagSet {
@@ -328,6 +293,8 @@ func printUsage() {
 usage:
   deploy [flags]          deploy the current commit
   deploy check [flags]    validate the config, print it, change nothing
+  deploy plan [flags]     preview version 2 topology offline; no host changes
+  deploy migrate [flags]  print a version 1 to 2 conversion; never writes it
   deploy status           current release, per service health, what is exposed
   deploy list             every project on the destination, not just this one
   deploy logs [-f] <svc>  tail a service
