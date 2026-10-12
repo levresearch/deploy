@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"os/exec"
 	"path/filepath"
@@ -10,9 +11,12 @@ import (
 
 func safetyDocker(t *testing.T, arguments ...string) string {
 	t.Helper()
-	output, err := exec.Command("docker", arguments...).CombinedOutput()
+	command := exec.Command("docker", arguments...)
+	var failure bytes.Buffer
+	command.Stderr = &failure
+	output, err := command.Output()
 	if err != nil {
-		t.Fatalf("docker %v: %v\n%s", arguments, err, output)
+		t.Fatalf("docker %v: %v\n%s\n%s", arguments, err, output, failure.String())
 	}
 	return strings.TrimSpace(string(output))
 }

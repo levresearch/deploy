@@ -132,6 +132,13 @@ func RunRollback(options DeployOptions, requested string) (exitCode int, err err
 		return exitPreconditionNotMet, err
 	}
 	layout := NewLayout(destination.Path, resolved.RuntimeID())
+	missing, err := missingOn(runner, stateWriteRequirements)
+	if err != nil {
+		return exitPreconditionNotMet, err
+	}
+	if len(missing) > 0 {
+		return exitPreconditionNotMet, missingPackages(runner.Describe(), missing)
+	}
 
 	lock, err := AcquireLock(runner, layout, requested, options.ForceUnlock)
 	if err != nil {

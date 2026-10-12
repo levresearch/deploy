@@ -67,10 +67,10 @@ func CheckLocalRequirements(runner Runner, destination Destination) error {
 func CheckDestination(runner Runner, resolved ResolvedProject, layout Layout) (DestinationFacts, error) {
 	host := runner.Describe()
 
-	needed := [][2]string{
+	needed := append(slices.Clone(stateWriteRequirements), [][2]string{
 		{"docker", "docker --version"},
 		{"docker compose plugin", "docker compose version"},
-	}
+	}...)
 	if len(HostedServices(resolved.Services)) > 0 {
 		// only required when something is actually exposed, so a project with no
 		// host block is never blocked on it
