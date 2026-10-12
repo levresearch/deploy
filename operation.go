@@ -117,6 +117,18 @@ func removeOperation(runner Runner, file string) error {
 // beginOperation runs under the lock, so no other deploy can be between the
 // check and the write.
 func (lock *Lock) beginOperation(command, target string) error {
+	if err := lock.checkNoOperation(); err != nil {
+		return err
+	}
+	operation, err := newOperation(command, target)
+	if err != nil {
+		return err
+	}
+
+	return lock.recordOperation(operation)
+}
+
+func (lock *Lock) checkNoOperation() error {
 	existing, found, err := readOperation(lock.lockOwner, lock.operationPath)
 	if err != nil {
 		return err
@@ -125,10 +137,10 @@ func (lock *Lock) beginOperation(command, target string) error {
 		return unresolvedOperation(lock.lockOwner, existing)
 	}
 
-	operation, err := newOperation(command, target)
-	if err != nil {
-		return err
-	}
+	return nil
+}
+
+func (lock *Lock) recordOperation(operation Operation) error {
 	if err := writeOperation(lock.lockOwner, lock.operationPath, operation); err != nil {
 		return err
 	}

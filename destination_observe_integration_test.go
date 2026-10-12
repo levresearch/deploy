@@ -11,7 +11,10 @@ import (
 	"testing"
 )
 
-func TestObservationOverRealSSHLeavesMissingPathsUntouched(t *testing.T) {
+// useSSHAliases points alias-one and alias-two at the loopback sshd through an
+// ssh wrapper first on PATH, so every ssh deploy runs resolves them.
+func useSSHAliases(t *testing.T) (*SSHRunner, string) {
+	t.Helper()
 	runner, directory, port := newSSHTestRunner(t)
 	ssh, err := exec.LookPath("ssh")
 	if err != nil {
@@ -29,6 +32,11 @@ func TestObservationOverRealSSHLeavesMissingPathsUntouched(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return runner, directory
+}
+
+func TestObservationOverRealSSHLeavesMissingPathsUntouched(t *testing.T) {
+	_, directory := useSSHAliases(t)
 	knownBefore, err := os.ReadFile(filepath.Join(directory, "known_hosts"))
 	if err != nil {
 		t.Fatal(err)
