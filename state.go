@@ -47,7 +47,7 @@ func (layout Layout) LockFile() string {
 
 // ReadState tolerates a project that has never been deployed, since the first
 // deploy has no state to find and that is not an error.
-func ReadState(runner Runner, layout Layout) (State, error) {
+func ReadState(runner stateReader, layout Layout) (State, error) {
 	raw, err := runner.ReadFile(layout.StateFile())
 	if errors.Is(err, fs.ErrNotExist) {
 		return State{}, nil

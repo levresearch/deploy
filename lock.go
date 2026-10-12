@@ -49,6 +49,10 @@ func AcquireLock(runner Runner, layout Layout, command, target string, force boo
 	if err != nil {
 		return nil, err
 	}
+	if err := refuseServiceState(runner, layout); err != nil {
+		lock.Release()
+		return nil, err
+	}
 	if err := lock.beginOperation(command, target); err != nil {
 		lock.Release()
 		return nil, err

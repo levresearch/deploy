@@ -23,15 +23,19 @@ type TopologyPlan struct {
 	Waves               [][]string                        `json:"readinessWaves"`
 	Connections         []PlannedConnection               `json:"connections"`
 	Network             PlannedNetwork                    `json:"network"`
+	RecordedOnly        []string                          `json:"recordedOnly,omitempty"`
 	Unverified          []string                          `json:"unverified"`
 }
 
 type PlannedDestination struct {
-	Name          string `json:"name"`
-	Target        string `json:"target"`
-	HostHint      string `json:"hostHint"`
-	HostIdentity  string `json:"hostIdentity"`
-	CanonicalPath string `json:"canonicalPath"`
+	Name                string `json:"name"`
+	Target              string `json:"target"`
+	HostHint            string `json:"hostHint"`
+	HostIdentity        string `json:"hostIdentity"`
+	CanonicalPath       string `json:"canonicalPath"`
+	RecordedState       string `json:"recordedState,omitempty"`
+	StateGeneration     int    `json:"stateGeneration,omitempty"`
+	UnresolvedOperation string `json:"unresolvedOperation,omitempty"`
 }
 
 type PlannedService struct {

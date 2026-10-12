@@ -26,7 +26,7 @@ func validRuntimeID(id string) bool {
 }
 
 // legacy staging data must never be adopted as production or silently relocated.
-func checkEnvironment(runner Runner, resolved ResolvedProject, layout Layout) (State, error) {
+func checkEnvironment(runner stateReader, resolved ResolvedProject, layout Layout) (State, error) {
 	if resolved.RuntimeID() != resolved.ID {
 		legacy, err := readEnvironmentState(runner, NewLayout(path.Dir(layout.Root), resolved.ID))
 		if err != nil {
@@ -46,7 +46,7 @@ func checkEnvironment(runner Runner, resolved ResolvedProject, layout Layout) (S
 	return state, nil
 }
 
-func readEnvironmentState(runner Runner, layout Layout) (State, error) {
+func readEnvironmentState(runner stateReader, layout Layout) (State, error) {
 	state, err := ReadState(runner, layout)
 	if err != nil {
 		return state, err

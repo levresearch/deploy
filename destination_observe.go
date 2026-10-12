@@ -48,10 +48,18 @@ unset DOCKER_CONTEXT DOCKER_HOST DOCKER_TLS_VERIFY DOCKER_CERT_PATH DOCKER_API_V
 docker --host unix:///var/run/docker.sock info --format '{"id":{{json .ID}},"os":{{json .OSType}},"architecture":{{json .Architecture}},"version":{{json .ServerVersion}},"security":{{json .SecurityOptions}}}'
 `
 
-type boundedOutput struct{ buffer bytes.Buffer }
+// boundedOutput caps what a destination can send back; zero means 16 KiB.
+type boundedOutput struct {
+	buffer bytes.Buffer
+	limit  int
+}
 
 func (output *boundedOutput) Write(contents []byte) (int, error) {
-	if len(contents) > 16384-output.buffer.Len() {
+	limit := output.limit
+	if limit == 0 {
+		limit = 16384
+	}
+	if len(contents) > limit-output.buffer.Len() {
 		return 0, errors.New("observation exceeded output limit")
 	}
 	return output.buffer.Write(contents)
@@ -67,6 +75,22 @@ func observeDestination(ctx context.Context, destination Destination) (Destinati
 	if destination.IsRemote() {
 		command[len(command)-1] = "remote"
 	}
+	output := boundedOutput{}
+	if _, err := runObservation(ctx, destination, command, &output); err != nil {
+		if errors.Is(err, errObservationCancelled) {
+			return DestinationObservation{}, err
+		}
+		return DestinationObservation{}, errors.New("cannot observe destination; require trusted SSH access, Linux identity files, realpath, directory access and the local Docker socket")
+	}
+	return parseDestinationObservation(output.String())
+}
+
+var errObservationCancelled = errors.New("destination observation timed out or was cancelled")
+
+// runObservation runs one read-only command with the strict probe options. It
+// returns the exit status so callers can tell an expected refusal from a
+// broken connection.
+func runObservation(ctx context.Context, destination Destination, command []string, output *boundedOutput) (int, error) {
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	var process *exec.Cmd
@@ -76,15 +100,16 @@ func observeDestination(ctx context.Context, destination Destination) (Destinati
 		process = exec.CommandContext(ctx, command[0], command[1:]...)
 	}
 	process.WaitDelay = time.Second
-	var output boundedOutput
-	process.Stdout, process.Stderr = &output, io.Discard
-	if err := process.Run(); err != nil {
-		if ctx.Err() != nil {
-			return DestinationObservation{}, errors.New("destination observation timed out or was cancelled")
-		}
-		return DestinationObservation{}, errors.New("cannot observe destination; require trusted SSH access, Linux identity files, realpath, directory access and the local Docker socket")
+	process.Stdout, process.Stderr = output, io.Discard
+	err := process.Run()
+	if ctx.Err() != nil {
+		return 0, errObservationCancelled
 	}
-	return parseDestinationObservation(output.String())
+	var exit *exec.ExitError
+	if errors.As(err, &exit) {
+		return exit.ExitCode(), err
+	}
+	return 0, err
 }
 
 func observationSSHOptions() []string {

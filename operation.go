@@ -46,7 +46,7 @@ func operationFile(layout Layout) string {
 	return path.Join(lockDirectory(layout), path.Base(layout.Root)+".operation.json")
 }
 
-func readOperation(runner Runner, file string) (Operation, bool, error) {
+func readOperation(runner stateReader, file string) (Operation, bool, error) {
 	raw, err := runner.ReadFile(file)
 	if errors.Is(err, fs.ErrNotExist) {
 		return Operation{}, false, nil
@@ -66,7 +66,7 @@ func readOperation(runner Runner, file string) (Operation, bool, error) {
 	return operation, true, nil
 }
 
-func unresolvedOperation(runner Runner, operation Operation) error {
+func unresolvedOperation(runner stateReader, operation Operation) error {
 	described := operation.Command
 	if operation.Target != "" {
 		described += " " + operation.Target

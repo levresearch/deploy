@@ -92,6 +92,33 @@ func TestObservationOverRealSSHLeavesMissingPathsUntouched(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(parent, "it's missing")); !os.IsNotExist(err) {
 		t.Fatal("probe created missing path")
 	}
+	if cliPlan.Destinations[0].RecordedState != "none" || cliPlan.Services[0].PreviousRelease != "none" {
+		t.Fatalf("a missing destination reported releases: %+v", cliPlan)
+	}
+
+	deployed := filepath.Join(link, "deployed")
+	writeFile(t, filepath.Join(parent, "deployed", "1234abcd"), stateFileName, `{"version":1,"current":"bbbbbbb","previous":"aaaaaaa","environment":"production","releases":["bbbbbbb","aaaaaaa"]}`)
+	project.Destinations = map[string]string{"app": "alias-one:" + deployed, "data": "alias-two:" + missing}
+	configuration, err = json.Marshal(project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	commitFile(t, repo, configFileName, string(configuration))
+	output = captureStdout(t, func() {
+		if code := run([]string{"plan", "--observe", "-C", repo}); code != exitOK {
+			t.Fatalf("observed plan exit: %d", code)
+		}
+	})
+	var recordedPlan TopologyPlan
+	if err := json.Unmarshal([]byte(output), &recordedPlan); err != nil {
+		t.Fatal(err)
+	}
+	if recordedPlan.Destinations[0].RecordedState != "version 1, adopted in memory" || recordedPlan.Services[0].Name != "api" || recordedPlan.Services[0].PreviousRelease != "bbbbbbb" {
+		t.Fatalf("the live release was not read over ssh: %+v", recordedPlan)
+	}
+	if entries, err := os.ReadDir(filepath.Join(parent, "deployed", "1234abcd")); err != nil || len(entries) != 1 {
+		t.Fatalf("planning changed the deployment: %v %v", entries, err)
+	}
 	knownAfter, err := os.ReadFile(filepath.Join(directory, "known_hosts"))
 	if err != nil {
 		t.Fatal(err)
