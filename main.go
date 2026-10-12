@@ -35,6 +35,7 @@ func init() {
 		"env":      runEnv,
 		"rollback": runRollback,
 		"resolve":  runResolve,
+		"adopt":    runAdopt,
 		"destroy":  runDestroy,
 		"dwh":      runConfigureWebhook,
 		"status":   func(args []string) int { return runInspect(args, "status") },
@@ -198,6 +199,25 @@ func runRollback(args []string) int {
 	return exitCode
 }
 
+func runAdopt(args []string) int {
+	flags := newFlagSet("adopt")
+	options := DeployOptions{}
+	write := false
+	stringFlag(flags, &options.Context, "context", "C", "", "scope deploy to this path instead of the cwd")
+	stringFlag(flags, &options.Environment, "environment", "e", defaultEnvironmentName, "environment to adopt")
+	flags.BoolVar(&write, "write", false, "record the adoption; without it nothing is written")
+	if keepGoing, exitCode := parseCommandFlags(flags, args); !keepGoing {
+		return exitCode
+	}
+
+	exitCode, err := RunAdopt(options, write)
+	if err != nil {
+		fatal("%v", err)
+	}
+
+	return exitCode
+}
+
 func runResolve(args []string) int {
 	if len(args) < 1 || strings.HasPrefix(args[0], "-") {
 		fatal("usage: deploy resolve <operation id>")
@@ -333,6 +353,8 @@ usage:
                           activate a retained release, default the previous one
   deploy resolve <id>     clear an operation that did not finish, after
                           checking what it changed
+  deploy adopt [--write]  record a version 1 deployment per service so a
+                          version 2 config can deploy it; previews without --write
 
 flags:
   -C, --context <path>      scope deploy to this path instead of the cwd

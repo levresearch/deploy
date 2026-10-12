@@ -356,9 +356,9 @@ logs, shell and exec work out which stack the service is in themselves, you neve
 
 3 is on purpose. once traffic is on the new version, tearing it down over a failed cleanup would be causing an outage to report one
 
-### version 2 planning preview
+### version 2
 
-Version 2 makes every service and release task choose a named destination. This release supports offline validation, planning and a migration preview. Deployment and other existing project operations still require version 1; keep your deployment config on version 1 until the version 2 executor is available.
+Version 2 makes every service and release task choose a named destination. This release supports offline validation, planning, a migration preview, `deploy` and `deploy adopt` for a config with exactly one destination, and `deploy resolve`. Rollback, status, releases, logs, shell, exec, env push and destroy still require version 1, so push env files before switching a project's config to version 2. Several destinations, published endpoint host ports and connections across destinations wait for managed networking.
 
 ```json
 {
@@ -418,7 +418,23 @@ Version 2 state lives in `services.json` beside `state.json`. It records each se
 
 Version 2 commands that change several destinations will lock all of them before changing any. Locks are always taken in the same order, by observed host identity and then canonical path, never by destination name or SSH alias. Two names that reach the same directory on the same host are refused, since one root would have two owners. If any lock is busy, the locks already taken are released and nothing changes. Once every lock is held, each destination is observed again. Its host, path, boot and Docker daemon must match the plan, and its recorded state generation must be unchanged; otherwise the command stops and asks for a new plan. One operation record, under one id, is then written to every destination before the first change. These locks share the same lock files as single-destination commands, so a version 1 command through any alias or symlinked path waits its turn. No command uses them yet.
 
-This is an observation of the current host, not a persistent ownership claim. Privileges, systemd, firewall rules, routes, secrets and application reachability remain unchecked, and host facts must be rechecked under locks before any future mutation. Version 2 execution remains unavailable.
+This is an observation of the current host, not a persistent ownership claim. Privileges, systemd, firewall rules, routes, secrets and application reachability remain unchecked, and host facts must be rechecked under locks before any future mutation.
+
+#### deploying with version 2
+
+`deploy` with a version 2 config observes the destination, locks it, checks it is still what was observed, records the operation and then:
+
+1. Writes `services.json` before changing anything, so the deployment is owned per service from the first step and version 1 deploy refuses it from then on.
+2. Places and builds the release as version 1 does, and brings up the shared stack with the stateful services and tunnels under their existing names.
+3. Walks the readiness waves from `dependsOn`. Release tasks in a wave run first, one at a time; each run is recorded as `indeterminate` before it starts and as `completed` or `failed` after. Stateless services in a wave start together, each in its own compose project, and the wave waits until all of them are healthy. A failed task or an unhealthy candidate stops the deploy, removes every candidate it started, and leaves every service on its previous release.
+4. Switches each service on its own: the candidate already answers on the project network, the live container is stopped, a hosted service's public hostname is verified (the live one is started again if it does not answer), and the stopped container is removed. Its compose file stays for rollback. If one switch fails, the services already switched stay switched, the rest keep their previous releases, and the state records exactly that.
+5. Records each switched service's current, previous and retained releases, then prunes per service. A release directory and its images are removed only once no service still refers to that commit.
+
+A release task whose last run is `indeterminate` blocks the next deploy. The interrupted operation is still recorded too, so `deploy resolve <id>` after inspecting what the task did clears it and marks that run `resolved`; it is never repeated automatically. Release tasks run on every deploy, as in version 1, so they must be safe to run again.
+
+A destination that holds a version 1 deployment is refused until it is adopted. `deploy adopt -C <directory>` previews what it would record: each service's live and previous commit stack, the shared stack for stateful services, and services that the live stack runs but the config no longer names, which are kept on record and left running. `deploy adopt --write` records it under the lock and an operation record. Nothing is restarted, renamed or moved; the next version 2 deploy moves each configured service out of its commit stack one at a time, and stateful volumes keep their names and contents.
+
+`--destination`, `--affected` and `--force-unlock` are refused with version 2.
 
 ### managed-network experiments
 

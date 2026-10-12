@@ -26,6 +26,9 @@ const (
 	outcomeUnknown       = "unknown"
 	outcomeCompleted     = "completed"
 	outcomeIndeterminate = "indeterminate"
+	// outcomeResolved is an indeterminate run that an operator inspected and
+	// settled with deploy resolve; whether it completed stays unknown
+	outcomeResolved = "resolved"
 )
 
 // stateReader is the read-only part of a Runner. Planning reads state through
@@ -204,7 +207,7 @@ func (run TaskRecord) validate() error {
 	if !validRecordedRelease(ServiceRelease{Commit: run.Commit, ConfigDigest: run.ConfigDigest}) || run.ConfigDigest == "" {
 		return fmt.Errorf("run %s needs a commit and config digest", run.Operation)
 	}
-	if !slices.Contains([]string{outcomeCompleted, outcomeFailed, outcomeIndeterminate}, run.Outcome) {
+	if !slices.Contains([]string{outcomeCompleted, outcomeFailed, outcomeIndeterminate, outcomeResolved}, run.Outcome) {
 		return fmt.Errorf("invalid outcome %q", run.Outcome)
 	}
 

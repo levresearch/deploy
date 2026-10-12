@@ -6,7 +6,10 @@ import (
 	"fmt"
 	"maps"
 	"os"
+	"os/signal"
 	"slices"
+	"sync"
+	"syscall"
 )
 
 // lockTarget is one deployment root as the host sees it, not as an alias names
@@ -52,9 +55,11 @@ func lockOrder(destinations map[string]Destination, observations map[string]Dest
 
 // LockSet holds every destination a multi-destination command changes.
 type LockSet struct {
-	locks   []*Lock
-	targets []lockTarget
-	closers []func()
+	locks    []*Lock
+	targets  []lockTarget
+	closers  []func()
+	released chan struct{}
+	once     sync.Once
 }
 
 type lockSetOptions struct {
@@ -70,7 +75,7 @@ type lockSetOptions struct {
 // the destinations are still the ones that were planned. Nothing is mutated
 // while only some locks are held, and any failure releases all of them.
 func acquireLockSet(ctx context.Context, targets []lockTarget, options lockSetOptions) (*LockSet, error) {
-	set := &LockSet{}
+	set := &LockSet{released: make(chan struct{})}
 	for _, target := range targets {
 		runner, closeRunner, err := options.open(target.Destination)
 		if err != nil {
@@ -171,6 +176,7 @@ func (set *LockSet) Finish(exitCode *int) {
 // Release lets go in reverse order and closes the connections. It is safe to
 // call more than once.
 func (set *LockSet) Release() {
+	set.once.Do(func() { close(set.released) })
 	for index := len(set.locks) - 1; index >= 0; index-- {
 		set.locks[index].Release()
 	}
@@ -178,4 +184,44 @@ func (set *LockSet) Release() {
 		set.closers[index]()
 	}
 	set.locks, set.targets, set.closers = nil, nil, nil
+}
+
+// Runner is the connection that holds the lock on the index-th destination in
+// lock order.
+func (set *LockSet) Runner(index int) Runner {
+	return set.locks[index].lockOwner
+}
+
+// ReleaseOnSignal stops a command between steps when it is interrupted or when
+// any lock's connection ends, leaving the operation recorded.
+func (set *LockSet) ReleaseOnSignal() {
+	interrupted := make(chan os.Signal, 1)
+	signal.Notify(interrupted, os.Interrupt, syscall.SIGTERM)
+	lost := make(chan struct{}, len(set.locks))
+	for _, lock := range set.locks {
+		go func() {
+			select {
+			case <-lock.exited:
+				lost <- struct{}{}
+			case <-lock.done:
+			}
+		}()
+	}
+	go func() {
+		defer signal.Stop(interrupted)
+		select {
+		case <-interrupted:
+			set.Release()
+			os.Exit(exitDeployFailed)
+		case <-lost:
+			select {
+			case <-set.released:
+				return
+			default:
+			}
+			fmt.Fprintln(os.Stderr, "deployment lock connection ended; stopping before further changes")
+			os.Exit(exitDeployFailed)
+		case <-set.released:
+		}
+	}()
 }

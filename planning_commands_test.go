@@ -58,7 +58,7 @@ func TestPlanningCommandsAreOfflineAndDoNotDiscloseEnvironment(t *testing.T) {
 		t.Fatal("planning modified git index")
 	}
 	code, err := RunDeploy(DeployOptions{Context: repo, Environment: "production", Destination: filepath.Join(repo, "must-not-exist")})
-	if code != exitPreconditionNotMet || err == nil || !strings.Contains(err.Error(), "execution is not available") {
+	if code != exitPreconditionNotMet || err == nil || !strings.Contains(err.Error(), "one destination for now") {
 		t.Fatalf("%d %v", code, err)
 	}
 	if _, err := os.Stat(filepath.Join(repo, "must-not-exist")); !os.IsNotExist(err) {

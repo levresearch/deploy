@@ -205,8 +205,37 @@ func ResolveOperation(runner Runner, layout Layout, id string) error {
 	if existing.ID != id {
 		return fmt.Errorf("the unfinished operation on %s is %s, not %s", runner.Describe(), existing.ID, id)
 	}
+	if err := settleTasks(runner, layout, id); err != nil {
+		return err
+	}
 
 	return removeOperation(runner, lock.operationPath)
+}
+
+// settleTasks marks the operation's release task runs whose result was never
+// seen as resolved, which records that someone inspected them rather than
+// claiming they completed or failed.
+func settleTasks(runner Runner, layout Layout, id string) error {
+	state, found, err := ReadServiceState(runner, layout)
+	if err != nil || !found {
+		return err
+	}
+	settled := false
+	for name, runs := range state.Tasks {
+		for index := range runs {
+			if runs[index].Operation == id && runs[index].Outcome == outcomeIndeterminate {
+				runs[index].Outcome = outcomeResolved
+				settled = true
+				fmt.Printf("  release task %s from %s marked resolved\n", name, runs[index].Commit)
+			}
+		}
+	}
+	if !settled {
+		return nil
+	}
+	_, err = WriteServiceState(runner, layout, state)
+
+	return err
 }
 
 func RunResolve(options DeployOptions, id string) (int, error) {
@@ -224,16 +253,23 @@ func RunResolve(options DeployOptions, id string) (int, error) {
 		return exitPreconditionNotMet, err
 	}
 
-	resolved, err := loadResolvedConfig(repositoryPath, options.Environment)
-	if err != nil {
-		return exitPreconditionNotMet, err
+	var resolved ResolvedProject
+	var destination Destination
+	if version, versionErr := configVersion(repositoryPath); versionErr == nil && version == 2 {
+		if options.Destination != "" {
+			return exitPreconditionNotMet, errors.New("version 2 takes its destination from the config")
+		}
+		resolved, _, destination, err = loadServiceConfig(repositoryPath, options.Environment)
+	} else {
+		resolved, err = loadResolvedConfig(repositoryPath, options.Environment)
+		if err == nil {
+			destinationText := options.Destination
+			if destinationText == "" {
+				destinationText = resolved.Destination
+			}
+			destination, err = ParseDestination(destinationText)
+		}
 	}
-
-	destinationText := options.Destination
-	if destinationText == "" {
-		destinationText = resolved.Destination
-	}
-	destination, err := ParseDestination(destinationText)
 	if err != nil {
 		return exitPreconditionNotMet, err
 	}
