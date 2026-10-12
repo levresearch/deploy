@@ -92,6 +92,10 @@ func RunDeploy(options DeployOptions) (exitCode int, err error) {
 		return exitPreconditionNotMet, err
 	}
 
+	if version, err := configVersion(repositoryPath); err == nil && version == 2 {
+		return RunServiceDeploy(options, repositoryPath)
+	}
+
 	// a project with no config gets one here rather than from a separate command,
 	// so deploy is the only thing anyone has to run
 	created, err := EnsureProjectConfig(repositoryPath, options.Destination)
