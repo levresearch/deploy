@@ -11,12 +11,14 @@ import (
 	"testing"
 )
 
+func ptr[T any](value T) *T { return &value }
+
 func recordedServiceState() ServiceState {
 	return ServiceState{
 		Project: "1234abcd", Name: "example", Environment: "production", Destination: "data", Naming: legacyNaming,
 		Services: map[string]ServiceRecord{
-			"db":  {Stateful: true, Outcome: outcomeLive, Current: &ServiceRelease{Commit: "aaaaaaa"}},
-			"old": {Outcome: outcomeLive, Current: &ServiceRelease{Commit: "bbbbbbb", ConfigDigest: strings.Repeat("c", 64)}, Previous: &ServiceRelease{Commit: "aaaaaaa"}, Releases: []string{"bbbbbbb", "aaaaaaa"}},
+			"db":  {Stateful: true, Outcome: outcomeLive, Current: ptr(sharedRelease("1234abcd", "aaaaaaa", ""))},
+			"old": {Outcome: outcomeLive, Current: ptr(serviceRelease("1234abcd", "old", "bbbbbbb", strings.Repeat("c", 64))), Previous: ptr(legacyRelease("1234abcd", "aaaaaaa")), Releases: []string{"bbbbbbb", "aaaaaaa"}},
 		},
 		Tasks: map[string][]TaskRecord{
 			"migrate": {{Operation: "0123456789abcdef", Commit: "aaaaaaa", ConfigDigest: strings.Repeat("d", 64), Outcome: outcomeCompleted}, {Operation: "fedcba9876543210", Commit: "bbbbbbb", ConfigDigest: strings.Repeat("d", 64), Outcome: outcomeIndeterminate}},
@@ -118,6 +120,9 @@ func TestLegacyAdoptionKeepsEveryLiveRelease(t *testing.T) {
 	if len(data.Services) != 1 || !db.Stateful || db.Current.Commit != "bbbbbbb" || db.Previous != nil || db.Releases != nil || db.Outcome != outcomeLive {
 		t.Fatalf("a stateful service was adopted with a rollback target: %+v", data.Services)
 	}
+	if db.Current.Project != "deploy-1234abcd-shared" || db.Current.ComposeFile != "shared/docker-compose.yml" {
+		t.Fatalf("a stateful service was not pointed at the shared stack: %+v", db.Current)
+	}
 	if data.Naming != legacyNaming || data.Project != "1234abcd" || data.Destination != "data" {
 		t.Fatalf("adopted identity: %+v", data)
 	}
@@ -129,6 +134,9 @@ func TestLegacyAdoptionKeepsEveryLiveRelease(t *testing.T) {
 	api := app.Services["api"]
 	if len(app.Services) != 1 || api.Current.Commit != "bbbbbbb" || api.Previous.Commit != "aaaaaaa" || !slices.Equal(api.Releases, legacy.Releases) {
 		t.Fatalf("a stateless service lost its releases: %+v", app.Services)
+	}
+	if api.Current.Project != "deploy-1234abcd-bbbbbbb" || api.Previous.ComposeFile != "releases/aaaaaaa/docker-compose.yml" {
+		t.Fatalf("adopted releases do not point at their commit stacks: %+v %+v", api.Current, api.Previous)
 	}
 	app.Generation = 1
 	if err := app.validate(); err != nil {

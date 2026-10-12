@@ -67,6 +67,10 @@ type ServiceRelease struct {
 	// ConfigDigest is empty for releases adopted from version 1 state, which
 	// never recorded the configuration it deployed.
 	ConfigDigest string `json:"configDigest,omitempty"`
+	// Project and ComposeFile address the release for cutover and rollback. A
+	// release adopted from version 1 points at its commit stack.
+	Project     string `json:"project"`
+	ComposeFile string `json:"composeFile"`
 }
 
 // TaskRecord keeps every release task run. An indeterminate run is never
@@ -148,7 +152,7 @@ func (state ServiceState) validate() error {
 	}
 
 	for _, name := range slices.Sorted(maps.Keys(state.Services)) {
-		if err := state.Services[name].validate(); err != nil {
+		if err := state.Services[name].validate(state.Project, name); err != nil {
 			return fmt.Errorf("service %q: %w", name, err)
 		}
 		if !serviceNamePattern.MatchString(name) {
@@ -169,13 +173,16 @@ func (state ServiceState) validate() error {
 	return nil
 }
 
-func (record ServiceRecord) validate() error {
+func (record ServiceRecord) validate(project, name string) error {
 	if !slices.Contains([]string{outcomeLive, outcomeFailed, outcomeUnknown}, record.Outcome) {
 		return fmt.Errorf("invalid outcome %q", record.Outcome)
 	}
 	for _, release := range []*ServiceRelease{record.Current, record.Previous} {
 		if release != nil && !validRecordedRelease(*release) {
 			return fmt.Errorf("invalid release %q", release.Commit)
+		}
+		if release != nil && !validArtifacts(project, name, record.Stateful, *release) {
+			return fmt.Errorf("release %s points at %s %s, which deploy would not have created", release.Commit, release.Project, release.ComposeFile)
 		}
 	}
 	if record.Current == nil && record.Previous != nil {
@@ -231,12 +238,18 @@ func adoptLegacyState(legacy State, resolved ResolvedProject, destination string
 		if service.Destination != "" && service.Destination != destination {
 			continue
 		}
-		record := ServiceRecord{Stateful: service.IsStateful(), Outcome: outcomeLive, Current: &ServiceRelease{Commit: legacy.Current}}
+		record := ServiceRecord{Stateful: service.IsStateful(), Outcome: outcomeLive}
 		// the shared stack is not rolled back with a release, so a stateful
 		// service has no previous release to return to
-		if !record.Stateful {
+		if record.Stateful {
+			current := sharedRelease(adopted.Project, legacy.Current, "")
+			record.Current = &current
+		} else {
+			current := legacyRelease(adopted.Project, legacy.Current)
+			record.Current = &current
 			if legacy.Previous != "" {
-				record.Previous = &ServiceRelease{Commit: legacy.Previous}
+				previous := legacyRelease(adopted.Project, legacy.Previous)
+				record.Previous = &previous
 			}
 			record.Releases = slices.Clone(legacy.Releases)
 		}
