@@ -18,18 +18,20 @@ import (
 )
 
 type Lock struct {
-	Version   int       `json:"version,omitempty"`
-	PID       int       `json:"pid"`
-	Host      string    `json:"host"`
-	Commit    string    `json:"commit"`
-	TakenAt   time.Time `json:"takenAt"`
-	lockPath  string
-	lockOwner Runner
-	process   *exec.Cmd
-	input     io.WriteCloser
-	release   *sync.Once
-	done      chan struct{}
-	exited    chan struct{}
+	Version       int       `json:"version,omitempty"`
+	PID           int       `json:"pid"`
+	Host          string    `json:"host"`
+	Commit        string    `json:"commit"`
+	TakenAt       time.Time `json:"takenAt"`
+	lockPath      string
+	operationPath string
+	operation     *Operation
+	lockOwner     Runner
+	process       *exec.Cmd
+	input         io.WriteCloser
+	release       *sync.Once
+	done          chan struct{}
+	exited        chan struct{}
 }
 
 func (runner LocalRunner) lockCommand(script string) *exec.Cmd {
@@ -40,13 +42,49 @@ func (runner *SSHRunner) lockCommand(script string) *exec.Cmd {
 	return runner.ssh(ShellCommand([]string{"sh", "-c", script}))
 }
 
+// AcquireLock holds the destination lock and records the operation before
+// anything changes. An earlier operation that never finished blocks it.
+func AcquireLock(runner Runner, layout Layout, command, target string, force bool) (*Lock, error) {
+	lock, err := holdLock(runner, layout, force)
+	if err != nil {
+		return nil, err
+	}
+	if err := lock.beginOperation(command, target); err != nil {
+		lock.Release()
+		return nil, err
+	}
+	if err := runner.MkdirAll(layout.Root); err != nil {
+		lock.endOperation()
+		lock.Release()
+		return nil, err
+	}
+	lock.PID = os.Getpid()
+	lock.Host, _ = os.Hostname()
+	lock.Commit = ShortCommit(target)
+	lock.TakenAt = time.Now().UTC().Truncate(time.Second)
+	encoded, err := json.Marshal(lock)
+	if err == nil {
+		err = runner.WriteFile(lock.lockPath, append(encoded, '\n'))
+	}
+	if err != nil {
+		lock.endOperation()
+		lock.Release()
+		return nil, fmt.Errorf("recording lock metadata: %w", err)
+	}
+	return lock, nil
+}
+
+func lockDirectory(layout Layout) string {
+	return path.Join(path.Dir(layout.Root), ".deploy-locks")
+}
+
 // the persistent inode is outside the project, so destroy cannot replace it.
-func AcquireLock(runner Runner, layout Layout, commit string, force bool) (*Lock, error) {
+func holdLock(runner Runner, layout Layout, force bool) (*Lock, error) {
 	commandRunner, ok := runner.(interface{ lockCommand(string) *exec.Cmd })
 	if !ok {
 		return nil, fmt.Errorf("%s cannot hold a deployment lock", runner.Describe())
 	}
-	locks := path.Join(path.Dir(layout.Root), ".deploy-locks")
+	locks := lockDirectory(layout)
 	if err := runner.MkdirAll(locks); err != nil {
 		return nil, err
 	}
@@ -74,7 +112,7 @@ func AcquireLock(runner Runner, layout Layout, commit string, force bool) (*Lock
 		process.Wait()
 		return nil, fmt.Errorf("cannot lock deployment on %s: another operation holds it or flock is unavailable (%s); --force-unlock cannot bypass an active lock", runner.Describe(), firstLine(failure.Bytes()))
 	}
-	lock := &Lock{Version: 2, lockPath: layout.LockFile(), lockOwner: runner, process: process, input: input, release: &sync.Once{}, done: make(chan struct{}), exited: make(chan struct{})}
+	lock := &Lock{Version: 2, lockPath: layout.LockFile(), operationPath: operationFile(layout), lockOwner: runner, process: process, input: input, release: &sync.Once{}, done: make(chan struct{}), exited: make(chan struct{})}
 	if existing, held := readLock(runner, layout.LockFile()); held && existing.Version != 2 && !force {
 		if _, stale := existing.isStale(); !stale {
 			input.Close()
@@ -86,22 +124,6 @@ func AcquireLock(runner Runner, layout Layout, commit string, force bool) (*Lock
 		process.Wait()
 		close(lock.exited)
 	}()
-	if err := runner.MkdirAll(layout.Root); err != nil {
-		lock.Release()
-		return nil, err
-	}
-	lock.PID = os.Getpid()
-	lock.Host, _ = os.Hostname()
-	lock.Commit = ShortCommit(commit)
-	lock.TakenAt = time.Now().UTC().Truncate(time.Second)
-	encoded, err := json.Marshal(lock)
-	if err == nil {
-		err = runner.WriteFile(lock.lockPath, append(encoded, '\n'))
-	}
-	if err != nil {
-		lock.Release()
-		return nil, fmt.Errorf("recording lock metadata: %w", err)
-	}
 	return lock, nil
 }
 

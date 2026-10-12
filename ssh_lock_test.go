@@ -89,17 +89,21 @@ func newSSHTestRunner(t *testing.T) (*SSHRunner, string, int) {
 func TestSSHLockLifetime(t *testing.T) {
 	runner, directory, _ := newSSHTestRunner(t)
 	layout := NewLayout(filepath.Join(directory, "destination"), "abcd1234")
-	lock, err := AcquireLock(runner, layout, "aaaaaaa", false)
+	lock, err := AcquireLock(runner, layout, "deploy", "aaaaaaa", false)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(lock.Release)
-	if duplicate, err := AcquireLock(runner, layout, "bbbbbbb", true); err == nil {
+	if duplicate, err := AcquireLock(runner, layout, "deploy", "bbbbbbb", true); err == nil {
 		duplicate.Release()
 		t.Fatal("ssh contender bypassed active lock")
 	}
-	lock.Release()
-	again, err := AcquireLock(runner, layout, "bbbbbbb", false)
+	finished := exitOK
+	lock.Finish(&finished)
+	if _, found, err := readOperation(runner, operationFile(layout)); found || err != nil {
+		t.Fatalf("a finished ssh operation stayed recorded: %v", err)
+	}
+	again, err := AcquireLock(runner, layout, "deploy", "bbbbbbb", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -109,7 +113,22 @@ func TestSSHLockLifetime(t *testing.T) {
 	// closing the transport must release the destination's held descriptor.
 	runner.Close()
 	<-again.exited
-	local, err := AcquireLock(LocalRunner{}, layout, "ccccccc", false)
+	// a lost connection is an unknown outcome, so the next operation must wait
+	// for an operator even though the lock itself is free.
+	if local, err := AcquireLock(LocalRunner{}, layout, "deploy", "ccccccc", false); err == nil || !strings.Contains(err.Error(), "did not finish") {
+		if err == nil {
+			local.Release()
+		}
+		t.Fatalf("a lost ssh operation did not block the next one: %v", err)
+	}
+	operation, found, err := readOperation(LocalRunner{}, operationFile(layout))
+	if err != nil || !found || operation.Target != "bbbbbbb" {
+		t.Fatalf("lost operation was not recorded: %+v %v", operation, err)
+	}
+	if err := ResolveOperation(LocalRunner{}, layout, operation.ID); err != nil {
+		t.Fatal(err)
+	}
+	local, err := AcquireLock(LocalRunner{}, layout, "deploy", "ccccccc", false)
 	if err != nil {
 		t.Fatal(err)
 	}

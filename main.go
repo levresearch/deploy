@@ -34,6 +34,7 @@ func init() {
 		"releases": runReleases,
 		"env":      runEnv,
 		"rollback": runRollback,
+		"resolve":  runResolve,
 		"destroy":  runDestroy,
 		"dwh":      runConfigureWebhook,
 		"status":   func(args []string) int { return runInspect(args, "status") },
@@ -197,6 +198,29 @@ func runRollback(args []string) int {
 	return exitCode
 }
 
+func runResolve(args []string) int {
+	if len(args) < 1 || strings.HasPrefix(args[0], "-") {
+		fatal("usage: deploy resolve <operation id>")
+		return exitPreconditionNotMet
+	}
+
+	flags := newFlagSet("resolve")
+	options := DeployOptions{}
+	stringFlag(flags, &options.Context, "context", "C", "", "scope deploy to this path instead of the cwd")
+	stringFlag(flags, &options.Destination, "destination", "D", "", "where the project gets deployed")
+	stringFlag(flags, &options.Environment, "environment", "e", defaultEnvironmentName, "environment to resolve")
+	if keepGoing, exitCode := parseCommandFlags(flags, args[1:]); !keepGoing {
+		return exitCode
+	}
+
+	exitCode, err := RunResolve(options, args[0])
+	if err != nil {
+		fatal("%v", err)
+	}
+
+	return exitCode
+}
+
 func runEnv(args []string) int {
 	if len(args) < 2 || args[0] != "push" {
 		fatal("usage: deploy env push <file>")
@@ -307,6 +331,8 @@ usage:
                           say whether one is set
   deploy rollback [<commit>]
                           activate a retained release, default the previous one
+  deploy resolve <id>     clear an operation that did not finish, after
+                          checking what it changed
 
 flags:
   -C, --context <path>      scope deploy to this path instead of the cwd
