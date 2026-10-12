@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -144,6 +145,9 @@ func RunDestroy(options DeployOptions, removeVolumes bool, confirmation io.Reade
 		return exitPreconditionNotMet, err
 	}
 	defer closeRunner()
+	if resolved.Version == 2 {
+		return exitPreconditionNotMet, errors.New("destroy is not available for version 2 yet; it would miss each service's own release")
+	}
 
 	projectName = resolved.Name
 	_, stateless := SplitServices(resolved.Services)

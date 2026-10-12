@@ -356,4 +356,10 @@ func TestTheEverydayCommandsFollowEachServicesRelease(t *testing.T) {
 	if _, err := RunRollback(options, ""); err == nil || !strings.Contains(err.Error(), "not available for version 2 yet") {
 		t.Errorf("rollback should say it is not available yet: %v", err)
 	}
+	if _, err := RunDestroy(options, true, strings.NewReader("everyday\n")); err == nil || !strings.Contains(err.Error(), "not available for version 2 yet") {
+		t.Errorf("destroy should say it is not available yet: %v", err)
+	}
+	if got := runningServices(t, ServiceReleaseProject(id, "app", commit)); !slices.Equal(got, []string{"app"}) {
+		t.Fatalf("a refused destroy touched the app: %v", got)
+	}
 }
