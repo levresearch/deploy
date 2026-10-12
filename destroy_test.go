@@ -305,6 +305,7 @@ func TestDestroyDescribesBeforeItAsks(t *testing.T) {
 
 func TestDestroyAgainstARealDeploy(t *testing.T) {
 	dockerAvailable(t)
+	t.Parallel()
 
 	repository := newRepository(t)
 	writeFile(t, repository, configFileName, `{

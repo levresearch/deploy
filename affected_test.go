@@ -327,6 +327,7 @@ func imageID(t *testing.T, tag string) string {
 // identical images regardless, app would not have moved either.
 func TestAffectedKeepsTheImageOfAServiceTheChangeDidNotReach(t *testing.T) {
 	dockerAvailable(t)
+	t.Parallel()
 
 	const projectID = "dd000020"
 	repository := newAffectedRepository(t, projectID)

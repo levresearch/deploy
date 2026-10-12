@@ -52,6 +52,7 @@ const sleeper = `"image": "busybox:latest", "command": ["sh", "-c", "sleep 600"]
 
 func TestAdoptionKeepsDataAndTheFirstServiceDeployMovesEachService(t *testing.T) {
 	dockerAvailable(t)
+	t.Parallel()
 	const id = "fb000001"
 	removeDeployment(t, id)
 	repository := newRepository(t)
@@ -148,6 +149,7 @@ func TestAdoptionKeepsDataAndTheFirstServiceDeployMovesEachService(t *testing.T)
 
 func TestReleaseTasksRunInOrderAndAreRecorded(t *testing.T) {
 	dockerAvailable(t)
+	t.Parallel()
 	const id = "fb000002"
 	removeDeployment(t, id)
 	repository := newRepository(t)
@@ -224,6 +226,7 @@ func TestReleaseTasksRunInOrderAndAreRecorded(t *testing.T) {
 
 func TestAFailedCandidateLeavesEveryServiceOnItsRelease(t *testing.T) {
 	dockerAvailable(t)
+	t.Parallel()
 	const id = "fb000003"
 	removeDeployment(t, id)
 	repository := newRepository(t)

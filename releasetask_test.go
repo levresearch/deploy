@@ -90,6 +90,7 @@ func TestReleaseTasksAreValidatedLikeServices(t *testing.T) {
 
 func TestASucceedingReleaseTaskLetsTheDeployContinue(t *testing.T) {
 	dockerAvailable(t)
+	t.Parallel()
 
 	repository := newRepository(t)
 	writeFile(t, repository, configFileName, `{
@@ -158,6 +159,7 @@ func TestASucceedingReleaseTaskLetsTheDeployContinue(t *testing.T) {
 // whatever was already serving exactly as it was.
 func TestAFailingReleaseTaskAbortsAndLeavesThePreviousReleaseServing(t *testing.T) {
 	dockerAvailable(t)
+	t.Parallel()
 
 	repository := newRepository(t)
 	const config = `{

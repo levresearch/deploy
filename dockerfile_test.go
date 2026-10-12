@@ -318,6 +318,7 @@ func TestContextInjectionDrainsEverythingItWasGiven(t *testing.T) {
 
 func TestAServiceBuiltFromAnInlineBlockActuallyRuns(t *testing.T) {
 	dockerAvailable(t)
+	t.Parallel()
 
 	repository := newRepository(t)
 	writeFile(t, repository, configFileName, `{
