@@ -246,11 +246,14 @@ func ExecuteDestroy(runner Runner, layout Layout, plan DestroyPlan) error {
 	}
 	if plan.Projects != nil {
 		fmt.Printf("  stopped %d compose project(s)\n", len(plan.Projects))
+	} else {
+		// a per-service deployment found its stacks by name above; only version 1
+		// keeps one commit stack per release directory
+		for _, release := range plan.Releases {
+			stopRelease(runner, plan.ProjectID, release, path.Join(layout.Release(release), composeFileName))
+		}
+		fmt.Printf("  stopped %d release stack(s)\n", len(plan.Releases))
 	}
-	for _, release := range plan.Releases {
-		stopRelease(runner, plan.ProjectID, release, path.Join(layout.Release(release), composeFileName))
-	}
-	fmt.Printf("  stopped %d release stack(s)\n", len(plan.Releases))
 
 	if _, err := runner.Run([]string{
 		"docker", "compose",

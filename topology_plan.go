@@ -89,7 +89,7 @@ func planTopology(resolved ResolvedProject, commit string) (TopologyPlan, error)
 	}
 	plan := TopologyPlan{
 		Version: 2, Project: resolved.RuntimeID(), Environment: resolved.Environment,
-		Commit: commit, ConfigDigest: hex.EncodeToString(digest[:]), ConfigurationSource: "working-tree",
+		Commit: commit, ConfigDigest: hex.EncodeToString(digest[:]), ConfigurationSource: "working-tree", ExecutionAvailable: true,
 		Waves: waves, Destinations: []PlannedDestination{}, Services: []PlannedService{}, Connections: []PlannedConnection{},
 		Network:    PlannedNetwork{Mode: "docker-only", Links: [][2]string{}, Action: "observe before determining changes", Requirements: []string{"Docker"}},
 		Unverified: []string{"host identities and SSH aliases", "canonical destination paths", "live and retained releases", "OS, architecture, privileges and firewall backend", "port, route and subnet conflicts", "secret-file environment variable collisions", "peer reachability and application authentication", "retained releases may still require an existing tunnel"},

@@ -49,7 +49,7 @@ func TestTopologyPlanPathsAndDeterminism(t *testing.T) {
 	if !reflect.DeepEqual(plan.Waves, [][]string{{"db"}, {"api"}}) {
 		t.Fatal(plan.Waves)
 	}
-	if plan.ExecutionAvailable || plan.Network.Mode != "wireguard-required" || plan.Connections[0].Host != "10.77.0.2" || plan.Connections[0].Port != 5432 {
+	if !plan.ExecutionAvailable || plan.Network.Mode != "wireguard-required" || plan.Connections[0].Host != "10.77.0.2" || plan.Connections[0].Port != 5432 {
 		t.Fatalf("unexpected plan: %+v", plan)
 	}
 	first, _ := json.Marshal(plan)
