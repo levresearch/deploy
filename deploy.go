@@ -167,7 +167,7 @@ func RunDeploy(options DeployOptions) (exitCode int, err error) {
 		return exitPreconditionNotMet, err
 	}
 
-	if err := CheckLocalRequirements(LocalRunner{}, destination); err != nil {
+	if err := CheckLocalRequirements(LocalRunner{}, destination, true); err != nil {
 		return exitPreconditionNotMet, err
 	}
 

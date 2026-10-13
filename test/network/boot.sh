@@ -6,6 +6,8 @@ echo 'f631afb1d8123a29779f720f7f08a97e9f2ce5f5c705b8d9f753df8ed0c3afddeb34e4f254
 curl -fsSL --retry 3 -o docker.tgz https://download.docker.com/linux/static/stable/x86_64/docker-29.1.3.tgz
 sha256sum docker.tgz > docker.sha256
 echo 'c019c608ba2bb009dd673f3230e4d743f36a78d36166c6c2444c05d0aa9ff0d9  docker.tgz' | sha256sum -c -
+curl -fsSL --retry 3 -o docker-compose https://github.com/docker/compose/releases/download/v5.5.1/docker-compose-linux-x86_64
+echo 'db1889184726840f75c4f9c001048430d4f25b3be3cb084d3ddd762bc0aed576  docker-compose' | sha256sum -c -
 ssh-keygen -q -t ed25519 -N '' -f id_ed25519
 for index in 1 2; do
   name=a
@@ -34,6 +36,7 @@ runcmd:
   - mkdir -p /mnt/lab
   - mount -t 9p -o trans=virtio,version=9p2000.L lab /mnt/lab
   - tar -xzf /mnt/lab/docker.tgz -C /usr/local/bin --strip-components=1
+  - install -D -m 0755 /mnt/lab/docker-compose /usr/local/lib/docker/cli-plugins/docker-compose
   - cp /mnt/lab/docker.service /etc/systemd/system/docker.service
   - groupadd -f docker
   - usermod -aG docker deployer

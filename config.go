@@ -72,7 +72,9 @@ type Host struct {
 }
 
 type ResolvedProject struct {
-	observedHosts      map[string]string
+	observedHosts map[string]string
+	// whole is the project a destination's view was cut from; see on
+	whole              *ResolvedProject
 	Version            int                `json:"version"`
 	ID                 string             `json:"id"`
 	Name               string             `json:"name"`
