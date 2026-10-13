@@ -6,6 +6,7 @@ output=${DEPLOY_NETWORK_OUTPUT:?set an absolute directory for non-secret results
 test "$(uname -m)" = x86_64
 test -c /dev/kvm
 command -v node >/dev/null
+command -v go >/dev/null
 docker info >/dev/null
 mkdir -p "$output"
 export DEPLOY_NETWORK_LAB
@@ -38,9 +39,10 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-docker build -t "$DEPLOY_NETWORK_IMAGE" "$here" > "$output/build.log" 2>&1
+CGO_ENABLED=0 go -C "$here/../.." build -o "$DEPLOY_NETWORK_LAB/deploy" . > "$output/build.log" 2>&1
+docker build -t "$DEPLOY_NETWORK_IMAGE" "$here" >> "$output/build.log" 2>&1
 bash "$here/lab.sh" up > "$output/boot.log" 2>&1
-for phase in setup network lifecycle locks failures; do
+for phase in ${DEPLOY_NETWORK_PHASES:-setup network lifecycle locks failures helper}; do
   echo "RUN $phase"
   node "$here/$phase.mjs" 2>&1 | tee "$output/$phase.log"
 done

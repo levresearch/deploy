@@ -328,6 +328,7 @@ fine for something small. it's a single stage build so every source change re-ru
 | `deploy rollback` | back to the previous release |
 | `deploy rollback 9f4be0a` | back to any release still on the server |
 | `deploy resolve 3f2a9c1e0b7d4a65` | clear an operation that did not finish, after checking what it changed |
+| `deploy network bootstrap` | install the root network helper on each host of a managed network, with your sudo |
 | `deploy destroy` | remove the project, keeps your data |
 | `deploy destroy --volumes` | remove the data too |
 
@@ -442,17 +443,25 @@ A destination that holds a version 1 deployment is refused until it is adopted. 
 
 The everyday commands follow each service's recorded release: `status` shows every service with its release, previous release and container status, including services the config no longer names; `releases` lists retained releases per service and each release task's last run; `logs`, `shell` and `exec` reach a service in whichever project serves it, its own release, a version 1 commit stack or the shared stack; `list` shows every project on the destination, with the live commits of a per-service deployment. `env push` takes the destination lock and records the operation like a deploy, and on a destination that was never deployed it claims the root per service. Commands that read state refuse a version 1 deployment that was not adopted, and state recorded for another project, environment or destination.
 
+### managed-network helper
+
+A managed network needs root on each of its hosts, and deploy gets it through one small helper rather than broad sudo. `deploy network bootstrap -C <directory> -e production` lists the hosts of that environment's network, shows the helper's path, version and sha256, the sudoers rule and the package step, and asks you to type `bootstrap`. On each host it then runs your own `sudo` once, with a password prompt, to install `/usr/local/libexec/deploy-network` owned by root, check the installed copy against the checksum, install `wireguard-tools` with apt if `wg` is missing, and write `/etc/sudoers.d/deploy-network` after `visudo` accepts it. That rule lets the SSH user run only `deploy-network version`, `observe`, `enroll`, `apply` and `remove` without a password, and nothing else as root. A host that already runs this release's helper is skipped, so a second bootstrap asks nothing. The helper is embedded in the deploy binary, so a deploy release and the helper it expects never come from different builds.
+
+The helper reads one network as plain `field value` lines on stdin and refuses anything else: unknown or repeated fields, stray whitespace, invalid keys, addresses outside the subnet, public subnets, or a runtime id that does not match its environment. It renders the WireGuard config and firewall rules itself, so nothing deploy sends is written or run verbatim. Everything it creates is named after the runtime id: interface `dw<12 hex>`, chains `DEPLOY-<12 HEX>-IN/-FWD/-OUT`, `wg-quick@<interface>`, the boot unit `deploy-network-<interface>.service`, `/etc/wireguard/<interface>.conf` and `.key`, and `/var/lib/deploy-network/<interface>/`. Ownership is proven by the owner manifest there, never by a name. `enroll` refuses an interface, key, unit or chain that exists without one, a UDP port already in use and a subnet that overlaps an existing route. Private keys are generated on the host and never printed; only public keys leave it. `apply` changes only what differs: a peer change syncs in place, only a changed interface address or port restarts WireGuard, flushed chains, missing jumps and lost routes are repaired, and an unchanged network reports `unchanged` with nothing written. `remove` deletes everything the runtime id owns and nothing else. Supported hosts are Debian or Ubuntu with systemd and rootful Docker on iptables; anything else is refused with the reason. `deploy network status`, `plan` and `apply`, which drive the helper across hosts, come next.
+
 ### managed-network experiments
 
-`test/network` probes the proposed WireGuard, firewall, service supervision and remote-operation locking mechanisms. It does not add multi-host deployment to the CLI.
+`test/network` probes the proposed WireGuard, firewall, service supervision and remote-operation locking mechanisms, then installs the network helper with the real deploy binary and exercises it. It does not add multi-host deployment to the CLI.
 
-On Linux amd64 with local rootful Docker, accessible `/dev/kvm`, Node 24, about 3 GiB available memory and 6 GiB free disk, run:
+On Linux amd64 with local rootful Docker, accessible `/dev/kvm`, Go, Node 24, about 3 GiB available memory and 6 GiB free disk, run:
 
 ```sh
 DEPLOY_NETWORK_OUTPUT=/absolute/path/outside/the/checkout/network-results bash test/network/run.sh
 ```
 
 The fixture downloads pinned Debian 12 and Docker 29.1.3, creates two disposable VMs inside a tools container, and tests real WireGuard traffic, NAT, UFW, no-op updates, reboots, rollback and disconnected SSH lock ownership. Guest packages require internet access. Only KVM is passed through; no host Docker socket, host network or privileged container is used. Firewall and systemd changes occur inside the VMs.
+
+`DEPLOY_NETWORK_PHASES` runs a subset, for example `setup network helper`; `setup` is always needed first.
 
 Logs remain in the output directory. The runner removes its container, image tag, VM disks and disposable keys on success or failure; Docker build cache may remain. Do not run concurrently against the same output directory. This opt-in suite is separate from normal Go CI. It covers Debian amd64 with Docker's iptables backend; other platforms, power-loss durability and the future CLI integration still require acceptance tests.
 
