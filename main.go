@@ -361,7 +361,9 @@ usage:
   deploy logs [-f] <svc>  tail a service
   deploy shell <svc>      a shell inside the running container
   deploy exec <svc> -- .. run one command inside it
-  deploy destroy          tear this project down, keeping data unless --volumes
+  deploy destroy          tear this project down, keeping data unless --volumes;
+                          version 2 removes every destination and the managed
+                          network, or only the destination -D names
   deploy releases         releases on the destination, current one marked
   deploy env push <file>  upload an env file to the destination
   deploy dwh [<url>]      set the discord webhook for this project, or

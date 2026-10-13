@@ -146,16 +146,14 @@ func RunDestroy(options DeployOptions, removeVolumes bool, confirmation io.Reade
 	var projectName string
 	var affected []string
 
+	if repositoryPath, isService := isServiceConfig(options); isService {
+		return runServiceDestroy(repositoryPath, options, removeVolumes, confirmation)
+	}
 	resolved, layout, runner, closeRunner, destination, err := openProject(options)
 	if err != nil {
 		return exitPreconditionNotMet, err
 	}
 	defer closeRunner()
-	if resolved.Version == 2 {
-		closeRunner()
-		repositoryPath, _ := isServiceConfig(options)
-		return runServiceDestroy(repositoryPath, options, removeVolumes, confirmation)
-	}
 
 	projectName = resolved.Name
 	_, stateless := SplitServices(resolved.Services)

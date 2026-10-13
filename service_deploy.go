@@ -232,6 +232,11 @@ func RunServiceDeploy(options DeployOptions, repositoryPath string) (exitCode in
 		set.Release()
 		return exitPreconditionNotMet, err
 	}
+	retiring, err := plannedRetirements(resolved, runs, selected)
+	if err != nil {
+		set.Release()
+		return exitPreconditionNotMet, err
+	}
 	operation, err := set.Begin("deploy", commit)
 	if err != nil {
 		set.Release()
@@ -389,6 +394,11 @@ func RunServiceDeploy(options DeployOptions, repositoryPath string) (exitCode in
 		}
 	}
 	var pruneErrs []error
+	if cutoverErr == nil {
+		for _, run := range runs {
+			retire(run, retiring[run.name])
+		}
+	}
 	for _, run := range runs {
 		run.state = executors[run.name].recordCutOver(run.state)
 		var pruneErr error
@@ -470,6 +480,51 @@ func runWaves(resolved ResolvedProject, runs []*destinationRun, executors map[st
 	}
 
 	return nil
+}
+
+// plannedRetirements finds, per destination, the stateless services it still
+// runs that the config has moved to another destination; they go once the
+// deploy is live there. A stateful service moving is refused, since its data
+// would stay behind. A service dropped from the config keeps running and stays
+// recorded, as it always has, until deploy destroy removes it.
+func plannedRetirements(resolved ResolvedProject, runs []*destinationRun, selected map[string]bool) (map[string][]string, error) {
+	retiring := map[string][]string{}
+	var problems []error
+	for _, run := range runs {
+		for _, name := range slices.Sorted(maps.Keys(run.state.Services)) {
+			record := run.state.Services[name]
+			placed, configured := resolved.Services[name]
+			if record.Current == nil || !configured || placed.Destination == run.name {
+				continue
+			}
+			if record.Stateful {
+				problems = append(problems, fmt.Errorf("stateful %s moves from %s to %s, but its data stays on %s; move the data yourself, or keep it on %s", name, run.name, placed.Destination, run.name, run.name))
+				continue
+			}
+			if selected != nil && !selected[name] {
+				continue
+			}
+			retiring[run.name] = append(retiring[run.name], name)
+		}
+	}
+
+	return retiring, errors.Join(problems...)
+}
+
+// retire removes a moved stateless service's live container from the
+// destination it left, and its record with it, so its releases there are
+// pruned like any other unreferenced ones.
+func retire(run *destinationRun, names []string) {
+	for _, name := range names {
+		current := run.state.Services[name].Current
+		compose := []string{"docker", "compose", "--file", path.Join(run.layout.Root, current.ComposeFile), "--project-name", current.Project}
+		if output, err := run.runner.Run(append(compose, "rm", "--stop", "--force", name)); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: could not remove %s from %s on %s: %s\n", name, current.Project, run.name, firstLine(output))
+			continue
+		}
+		delete(run.state.Services, name)
+		fmt.Printf("  retired %s from %s; it now runs on %s\n", name, run.name, placedOn(run.view, name))
+	}
 }
 
 // selectNodes checks the names given to --service. nil means everything.
@@ -951,4 +1006,9 @@ func pruneServiceReleases(runner Runner, layout Layout, id string, state Service
 	}
 
 	return state, nil
+}
+
+// placedOn names the destination the whole config places a service on.
+func placedOn(resolved ResolvedProject, name string) string {
+	return resolved.topology().Services[name].Destination
 }

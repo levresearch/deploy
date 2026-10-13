@@ -123,3 +123,40 @@ func TestASelectedDeployNeedsWhatItWaitsOnToBeThere(t *testing.T) {
 		t.Fatalf("no selection is not everything: %v %v", all, err)
 	}
 }
+
+func TestMovedServicesRetireButStatefulOnesNeverMove(t *testing.T) {
+	resolved := topologyResolved(t)
+	api := serviceRelease(resolved.RuntimeID(), "api", "aaaaaaa", "")
+	db := sharedRelease(resolved.RuntimeID(), "aaaaaaa", "")
+	old := serviceRelease(resolved.RuntimeID(), "old", "aaaaaaa", "")
+	runs := []*destinationRun{
+		{name: "app", state: ServiceState{Services: map[string]ServiceRecord{"api": {Current: &api, Outcome: outcomeLive}}}},
+		{name: "data", state: ServiceState{Services: map[string]ServiceRecord{
+			"db": {Stateful: true, Current: &db, Outcome: outcomeLive}, "old": {Current: &old, Outcome: outcomeLive},
+		}}},
+	}
+	retiring, err := plannedRetirements(resolved, runs, nil)
+	if err != nil || len(retiring) != 0 {
+		t.Fatalf("nothing moved, yet %v %v", retiring, err)
+	}
+
+	moved := topologyResolved(t)
+	moving := moved.Services["api"]
+	moving.Destination = "data"
+	moved.Services["api"] = moving
+	retiring, err = plannedRetirements(moved, runs, nil)
+	if err != nil || strings.Join(retiring["app"], ",") != "api" || len(retiring["data"]) != 0 {
+		t.Fatalf("a moved api should retire from app only, and the dropped old stay: %v %v", retiring, err)
+	}
+	if retiring, _ := plannedRetirements(moved, runs, map[string]bool{"web": true}); len(retiring) != 0 {
+		t.Fatalf("a selected deploy retired what it did not select: %v", retiring)
+	}
+
+	relocated := topologyResolved(t)
+	store := relocated.Services["db"]
+	store.Destination = "app"
+	relocated.Services["db"] = store
+	if _, err := plannedRetirements(relocated, runs, nil); err == nil || !strings.Contains(err.Error(), "its data stays on data") {
+		t.Fatalf("a stateful service was allowed to move: %v", err)
+	}
+}

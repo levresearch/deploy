@@ -342,54 +342,91 @@ func planServiceDestroy(runner Runner, resolved ResolvedProject, layout Layout, 
 	return plan, state, nil
 }
 
+// runServiceDestroy tears down every destination of the environment, or the
+// one --destination names, after one confirmation. Destroying everything also
+// removes the managed network from every host that has it; destroying one
+// destination removes the network from its host only once nothing left in the
+// config links that host.
 func runServiceDestroy(repositoryPath string, options DeployOptions, removeVolumes bool, confirmation io.Reader) (exitCode int, err error) {
-	if options.Destination != "" {
-		return exitPreconditionNotMet, errors.New("version 2 takes its destination from the config; --destination applies to version 1")
-	}
-	resolved, name, destination, err := loadServiceConfig(repositoryPath, options.Environment)
+	resolved, destinations, err := loadTopology(repositoryPath, options.Environment)
 	if err != nil {
 		return exitPreconditionNotMet, err
+	}
+	scope := destinations
+	if options.Destination != "" {
+		only, found := destinations[options.Destination]
+		if !found {
+			return exitPreconditionNotMet, fmt.Errorf("version 2 destroy takes a destination name with --destination; %s has %s", resolved.Environment, strings.Join(slices.Sorted(maps.Keys(destinations)), ", "))
+		}
+		scope = map[string]Destination{options.Destination: only}
 	}
 	notifier, err := NewNotifier(repositoryPath, resolved.Notify)
 	if err != nil {
 		return exitPreconditionNotMet, err
 	}
 
-	runner, closeRunner, err := OpenRunner(destination)
+	ctx := context.Background()
+	observations, err := observeTopology(ctx, &resolved, destinations, observeDestination)
 	if err != nil {
 		return exitPreconditionNotMet, err
 	}
-	absolute, err := AbsoluteDestination(runner, destination)
+	networks, kept, err := networksToRemove(ctx, resolved, scope, len(scope) < len(destinations))
 	if err != nil {
-		closeRunner()
-		return exitPreconditionNotMet, err
-	}
-	layout := NewLayout(absolute.Path, resolved.RuntimeID())
-	plan, state, err := planServiceDestroy(runner, resolved, layout, absolute.Path, removeVolumes)
-	closeRunner()
-	if err != nil {
-		return exitPreconditionNotMet, err
-	}
-	plan.Describe(os.Stdout)
-	if err := ConfirmDestroy(plan, confirmation, os.Stdout); err != nil {
 		return exitPreconditionNotMet, err
 	}
 
-	set, lockedLayout, err := lockServiceDestination(resolved, name, destination)
+	_, opened, closeAll, err := openServiceDestinations(repositoryPath, DeployOptions{Context: options.Context, Environment: options.Environment}, slices.Sorted(maps.Keys(scope))...)
 	if err != nil {
 		return exitPreconditionNotMet, err
 	}
-	locked := set.Runner(0)
-	// the plan was confirmed against a path that may be spelled differently
-	// from the canonical one the lock resolved, so compare what it found
-	updated, current, err := planServiceDestroy(locked, resolved, NewLayout(path.Dir(lockedLayout.Root), resolved.RuntimeID()), path.Dir(lockedLayout.Root), removeVolumes)
-	if err != nil {
-		set.Release()
+	plans := map[string]DestroyPlan{}
+	generations := map[string]int{}
+	for index, each := range opened {
+		plan, state, err := planServiceDestroy(each.runner, each.view, each.layout, each.destination.Path, removeVolumes)
+		if err != nil {
+			closeAll()
+			return exitPreconditionNotMet, fmt.Errorf("destination %s: %w", each.name, err)
+		}
+		plans[each.name], generations[each.name] = plan, state.Generation
+		if len(opened) > 1 || len(destinations) > 1 {
+			if index > 0 {
+				fmt.Println()
+			}
+			fmt.Printf("destination %s\n", each.name)
+		}
+		plan.Describe(os.Stdout)
+	}
+	closeAll()
+	for _, network := range networks {
+		fmt.Printf("\n  removing   managed network %s on %s\n", network.Network.Interface, network.Target)
+	}
+	for _, host := range kept {
+		fmt.Printf("\n  keeping    managed network on %s, which the rest of the config still links\n", host)
+	}
+	if err := ConfirmDestroy(plans[slices.Sorted(maps.Keys(plans))[0]], confirmation, os.Stdout); err != nil {
 		return exitPreconditionNotMet, err
 	}
-	if current.Generation != state.Generation || !slices.Equal(updated.Projects, plan.Projects) || !slices.Equal(updated.Releases, plan.Releases) {
-		set.Release()
-		return exitPreconditionNotMet, errors.New("deployment changed during confirmation; run destroy again to review the new plan")
+
+	set, runs, err := lockTopology(ctx, resolved, scope, observations)
+	if err != nil {
+		return exitPreconditionNotMet, err
+	}
+	updated := map[string]DestroyPlan{}
+	for _, run := range runs {
+		// the plan was confirmed against a path that may be spelled differently
+		// from the canonical one the lock resolved, so compare what it found
+		plan, current, err := planServiceDestroy(run.runner, run.view, run.layout, path.Dir(run.layout.Root), removeVolumes)
+		if err != nil {
+			set.Release()
+			return exitPreconditionNotMet, fmt.Errorf("destination %s: %w", run.name, err)
+		}
+		confirmed := plans[run.name]
+		if current.Generation != generations[run.name] || !slices.Equal(plan.Projects, confirmed.Projects) || !slices.Equal(plan.Releases, confirmed.Releases) {
+			set.Release()
+			return exitPreconditionNotMet, errors.New("deployment changed during confirmation; run destroy again to review the new plan")
+		}
+		updated[run.name] = plan
+		run.state = current
 	}
 	if _, err := set.Begin("destroy", ""); err != nil {
 		set.Release()
@@ -398,19 +435,98 @@ func runServiceDestroy(repositoryPath string, options DeployOptions, removeVolum
 	set.ReleaseOnSignal()
 	defer set.Finish(&exitCode)
 
-	if err := ExecuteDestroy(locked, lockedLayout, updated); err != nil {
-		return exitDeployFailed, err
-	}
 	var affected []string
-	for service, record := range current.Services {
-		if !record.Stateful {
-			affected = append(affected, service)
+	for _, run := range runs {
+		if len(runs) > 1 {
+			fmt.Printf("destination %s\n", run.name)
+		}
+		if err := ExecuteDestroy(run.runner, run.layout, updated[run.name]); err != nil {
+			return exitDeployFailed, fmt.Errorf("destination %s: %w", run.name, err)
+		}
+		// what is kept stays owned, so the next deploy or destroy here knows
+		// whose env files and volumes they are
+		if entries, err := run.runner.ListDirectory(run.layout.Root); !removeVolumes && err == nil && len(entries) > 0 {
+			kept := ServiceState{
+				Version: serviceStateVersion, Project: resolved.RuntimeID(), Name: resolved.Name, Environment: resolved.Environment,
+				Destination: run.name, Naming: legacyNaming, Generation: run.state.Generation, Services: map[string]ServiceRecord{},
+			}
+			if _, err := WriteServiceState(run.runner, run.layout, kept); err != nil {
+				return exitDeployFailed, fmt.Errorf("destination %s: the project is gone, but recording who owns the kept data failed: %w", run.name, err)
+			}
+		}
+		for service, record := range run.state.Services {
+			if !record.Stateful {
+				affected = append(affected, service)
+			}
+		}
+	}
+	for _, network := range networks {
+		if _, err := callNetworkHelper(ctx, Destination{Host: network.Target}, "remove", identityInput(resolved)); err != nil {
+			return exitDeployFailed, fmt.Errorf("the services are gone, but removing the managed network on %s failed: %w", network.Target, err)
+		}
+		fmt.Printf("  removed managed network %s on %s\n", network.Network.Interface, network.Target)
+		for _, run := range runs {
+			if slices.Contains(network.Destinations, run.name) {
+				if err := run.runner.RemoveAll(run.layout.NetworkRecordFile()); err != nil {
+					return exitDeployFailed, fmt.Errorf("destination %s: %w", run.name, err)
+				}
+			}
 		}
 	}
 	slices.Sort(affected)
 	notifier.SendStage(stageDowntime, resolved.Name, affected, StageVersions{})
 
 	return exitOK, nil
+}
+
+// networksToRemove finds the managed networks a destroy takes down: one on
+// each host in scope that has this environment's network. When only part of
+// the environment goes, a host the rest of the config still links keeps it.
+func networksToRemove(ctx context.Context, resolved ResolvedProject, scope map[string]Destination, partial bool) ([]networkHost, []string, error) {
+	needed, err := networkHosts(resolved)
+	if err != nil {
+		return nil, nil, err
+	}
+	var removing []networkHost
+	var kept []string
+	seen := map[string]bool{}
+	for _, name := range slices.Sorted(maps.Keys(scope)) {
+		destination := scope[name]
+		host := resolved.destinationHost(name)
+		if !destination.IsRemote() || seen[host] {
+			continue
+		}
+		seen[host] = true
+		observed, err := callNetworkHelper(ctx, destination, "observe", identityInput(resolved))
+		if errors.Is(err, errNetworkHelperMissing) {
+			// no helper means deploy never set up a network here
+			continue
+		}
+		if err != nil {
+			return nil, nil, fmt.Errorf("destination %s: %w", name, err)
+		}
+		report, err := parseHostObservation(observed)
+		if err != nil {
+			return nil, nil, fmt.Errorf("destination %s: %w", name, err)
+		}
+		if !report.Owner {
+			continue
+		}
+		if partial && slices.ContainsFunc(needed, func(network networkHost) bool { return network.Name == host }) {
+			kept = append(kept, destination.Host)
+			continue
+		}
+		var destinations []string
+		for other := range resolved.Destinations {
+			if resolved.destinationHost(other) == host {
+				destinations = append(destinations, other)
+			}
+		}
+		slices.Sort(destinations)
+		removing = append(removing, networkHost{Name: host, Target: destination.Host, Destinations: destinations, Network: HostNetwork{Interface: report.Interface}})
+	}
+
+	return removing, kept, nil
 }
 
 // planServiceReuse is --affected per service: each service is compared with
