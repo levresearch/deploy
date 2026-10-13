@@ -14,7 +14,9 @@
 #   check     validate stdin and print what apply would render; needs no root
 #   observe   print the owned network's non-secret state
 #   enroll    claim the interface and create its key; print the public key
-#   apply     converge the owned network on stdin; no change when it matches
+#   apply     converge the owned network on stdin; no change when it matches.
+#             a failed apply puts back the files and state it had before; a
+#             changing one keeps the files it replaced in previous/.
 #   remove    take down and delete everything the runtime id owns
 #   restore   reload the owned chains at boot (run by systemd, not deploy)
 #
@@ -31,6 +33,7 @@ readonly helper_path=/usr/local/libexec/deploy-network
 readonly state_root=/var/lib/deploy-network
 readonly config_root=/etc/wireguard
 readonly unit_root=/etc/systemd/system
+readonly prior_root=/run/deploy-network-prior
 
 refuse() {
   printf 'refused: %s\n' "$*" >&2
@@ -275,7 +278,7 @@ write_file() {
   temporary=$(mktemp "$directory/.deploy-network.XXXXXXXX")
   cat >"$temporary"
   chmod "$mode" "$temporary"
-  mv -fT "$temporary" "$target"
+  mv -fT "$temporary" "$target" || { rm -f "$temporary"; return 1; }
 }
 
 # same reports whether a file already holds exactly what stdin holds.
@@ -344,6 +347,92 @@ ensure_jumps() {
   done < <(jumps_of "$1")
 }
 
+# drop_firewall deletes the jumps and the owned chains.
+drop_firewall() {
+  local builtin target chain
+  while read -r builtin target; do
+    while iptables -w -C "$builtin" -j "$target" 2>/dev/null; do iptables -w -D "$builtin" -j "$target"; done
+  done < <(jumps_of "$1")
+  while read -r chain; do
+    if iptables -w -n -L "$chain" >/dev/null 2>&1; then
+      iptables -w -F "$chain"
+      iptables -w -X "$chain"
+    fi
+  done < <(chains_of "$1")
+}
+
+# set_routes makes the interface carry exactly the routes in a recorded list.
+set_routes() {
+  local name=$1 list=$2 route wanted=' '
+  if [ -f "$list" ]; then
+    while read -r route; do
+      [ -n "$route" ] || continue
+      [[ $route =~ ^(.+)/32$ ]] && [[ ${BASH_REMATCH[1]} =~ $ipv4_pattern ]] || refuse "invalid recorded route $route"
+      wanted+="$route "
+      ip -4 route replace "$route" dev "$name"
+    done <"$list"
+  fi
+  while read -r route _; do
+    [[ $route == */* ]] || route=$route/32
+    [[ $wanted == *" $route "* ]] || ip -4 route del "$route" dev "$name"
+  done < <(ip -4 -o route show dev "$name" | grep -v ' proto kernel ' || true)
+}
+
+# tracked lists every file apply may change, as a name and a path.
+tracked() {
+  local state=$state_root/$1
+  printf '%s\n' "owner $state/owner.json" "config $config_root/$1.conf" "routes $state/routes" \
+    "rules $state/firewall.rules" "live $state/firewall.live" "applied $state/applied" "unit $unit_root/deploy-network-$1.service"
+}
+
+# snapshot keeps the files apply may change, so a failed apply can put them back.
+# it lives under /run so an apply that changes nothing writes nothing to disk.
+snapshot() {
+  local prior=$prior_root/$1 label path
+  rm -rf -- "$prior"
+  install -d -o root -g root -m 0700 "$prior_root" "$prior"
+  while read -r label path; do
+    if [ -f "$path" ]; then cp -p -- "$path" "$prior/$label"; else : >"$prior/$label.absent"; fi
+  done < <(tracked "$1")
+}
+
+# revert runs when apply exits early and returns the host to the snapshot. it
+# keeps going past errors so one broken step does not stop the rest.
+revert() {
+  local status=$? name=$1 prior=$prior_root/$1 label path failed=false
+  trap - EXIT
+  set +e
+  [ "$status" -ne 0 ] && [ -d "$prior" ] || exit "$status"
+  while read -r label path; do
+    if [ -f "$prior/$label.absent" ]; then
+      rm -f -- "$path" || failed=true
+    elif ! cmp -s "$prior/$label" "$path"; then
+      cp -p -- "$prior/$label" "$path.deploy-network-revert" && mv -fT "$path.deploy-network-revert" "$path" || failed=true
+    fi
+  done < <(tracked "$name")
+  systemctl daemon-reload || failed=true
+  if [ ! -f "$config_root/$name.conf" ]; then
+    systemctl disable --now --quiet "deploy-network-$name.service" "wg-quick@$name" 2>/dev/null
+  elif systemctl is-active --quiet "wg-quick@$name"; then
+    systemctl restart "wg-quick@$name" || failed=true
+  fi
+  if ip link show "$name" >/dev/null 2>&1; then
+    (set_routes "$name" "$state_root/$name/routes") || failed=true
+  fi
+  if [ -f "$state_root/$name/firewall.rules" ]; then
+    { iptables-restore -w --noflush <"$state_root/$name/firewall.rules" && (ensure_jumps "$name"); } || failed=true
+  else
+    (drop_firewall "$name") || failed=true
+  fi
+  rm -rf -- "$prior"
+  if [ "$failed" = true ]; then
+    printf 'failed: apply stopped and %s could not be fully restored; run apply again\n' "$name" >&2
+  else
+    printf 'failed: apply stopped; %s is back to its previous state\n' "$name" >&2
+  fi
+  exit "$status"
+}
+
 live_rules() {
   local chain
   while read -r chain; do
@@ -405,6 +494,10 @@ verb_apply() {
   state=$state_root/$name config=$config_root/$name.conf unit=deploy-network-$name.service
   require_owner "$name"
   require_free "$name"
+  snapshot "$name"
+  # the name is expanded now on purpose; it is validated and the local is gone by exit
+  # shellcheck disable=SC2064
+  trap "revert $name" EXIT
 
   if ! render_owner | same "$state/owner.json"; then
     render_owner | write_file "$state/owner.json" 0600
@@ -482,6 +575,13 @@ verb_apply() {
   if ! printf '%s\n' "${digest%% *}" | same "$state/applied"; then
     printf '%s\n' "${digest%% *}" | write_file "$state/applied" 0600
   fi
+  trap - EXIT
+  if [ "${#changes[@]}" -eq 0 ]; then
+    rm -rf -- "${prior_root:?}/$name"
+  else
+    rm -rf -- "$state/previous"
+    mv -T "$prior_root/$name" "$state/previous"
+  fi
   # the unit runs restore, which takes the lock itself
   if ! systemctl is-active --quiet "$unit"; then
     exec 9>&-
@@ -541,7 +641,7 @@ verb_remove() {
   read_desired
   validate identity
   lock
-  local name builtin target chain unit
+  local name unit
   name=$(interface_name)
   unit=deploy-network-$name.service
   [ -e "$state_root/$name" ] || { echo "absent $name"; return; }
@@ -551,15 +651,7 @@ verb_remove() {
   systemctl disable --now --quiet "wg-quick@$name" 2>/dev/null || true
   systemctl daemon-reload
   ! ip link show "$name" >/dev/null 2>&1 || ip link delete "$name"
-  while read -r builtin target; do
-    while iptables -w -C "$builtin" -j "$target" 2>/dev/null; do iptables -w -D "$builtin" -j "$target"; done
-  done < <(jumps_of "$name")
-  while read -r chain; do
-    if iptables -w -n -L "$chain" >/dev/null 2>&1; then
-      iptables -w -F "$chain"
-      iptables -w -X "$chain"
-    fi
-  done < <(chains_of "$name")
+  drop_firewall "$name"
   rm -f "$config_root/$name.conf" "$config_root/$name.key"
   rm -rf "${state_root:?}/$name"
   echo "removed $name"

@@ -1,0 +1,58 @@
+# The managed network is only really tested in two throwaway VMs that run the
+# root helper, WireGuard, iptables and Docker for real. That needs KVM and takes
+# a while, so it runs on its own: when a pull request touches the network, or
+# by hand. check.yml stays the gate for every push.
+name: network lab
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - network_*.go
+      - network_helper.sh
+      - test/network/**
+      - .github/workflows/network-lab.yml
+
+jobs:
+  lab:
+    name: network lab VMs
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      # hosted runners have /dev/kvm but only root can open it until this rule
+      # hands it to everyone
+      - name: KVM is usable
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          test -r /dev/kvm && test -w /dev/kvm
+
+      # each phase prints a PASS line as it goes, so this step never sits silent
+      - name: lab
+        env:
+          DEPLOY_NETWORK_OUTPUT: ${{ runner.temp }}/network-lab
+        run: bash test/network/run.sh
+
+      # the results directory holds only logs; the lab directory with the VM
+      # keys is removed by run.sh and excluded here in case cleanup was cut short
+      - name: keep the logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: network-lab-logs
+          path: |
+            ${{ runner.temp }}/network-lab
+            !${{ runner.temp }}/network-lab/.lab.*
+          if-no-files-found: ignore
+          retention-days: 7

@@ -170,3 +170,19 @@ func TestNetworkCommandsNeedAKnownVerb(t *testing.T) {
 		}
 	}
 }
+
+func TestHelperFailuresKeepTheHelpersOwnOutcome(t *testing.T) {
+	for reason, want := range map[string]string{
+		"mv: cannot move 'a' to 'b': Operation not permitted\nfailed: apply stopped; dw0123 is back to its previous state":    "network helper apply failed on vm-b: mv: cannot move 'a' to 'b': Operation not permitted; apply stopped; dw0123 is back to its previous state",
+		"failed: apply stopped; dw0123 is back to its previous state":                                                         "network helper apply failed on vm-b: apply stopped; dw0123 is back to its previous state",
+		"refused: UDP port 51821 is already in use on this host\nfailed: apply stopped; dw0123 is back to its previous state": "vm-b refused apply: UDP port 51821 is already in use on this host",
+		"something broke": "network helper apply failed on vm-b: something broke",
+	} {
+		if got := helperFailure("vm-b", "apply", reason).Error(); got != want {
+			t.Fatalf("got\n%s\nwant\n%s", got, want)
+		}
+	}
+	if err := helperFailure("vm-b", "apply", "sudo: a password is required"); !errors.Is(err, errNetworkHelperMissing) {
+		t.Fatalf("a missing sudoers rule: %v", err)
+	}
+}
