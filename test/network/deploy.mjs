@@ -15,6 +15,7 @@ const iface = 'dw' + createHash('sha256').update(runtime).digest('hex').slice(0,
 const root = `/home/deployer/Projects/app/${runtime}`;
 const git = (...args) => succeed(inContainer(['git', '-C', '/lab/app', '-c', 'user.name=lab', '-c', 'user.email=lab@example.invalid', ...args]));
 const deploy = (...args) => inContainer(['/lab/bin/deploy', ...args, '-C', '/lab/app']);
+const exec = (service, ...command) => inContainer(['/lab/bin/deploy', 'exec', service, '-C', '/lab/app', '--', ...command]);
 
 const config = {
   version: 2, id: runtime, name: 'app',
@@ -34,7 +35,7 @@ const config = {
       endpoints: { resp: { port: 6379, hostPort: 6391, protocol: 'tcp' } },
     },
     api: {
-      destination: 'b', image, dependsOn: { cache: 'healthy' },
+      destination: 'b', image, dependsOn: { cache: 'healthy' }, env: ['api.env'],
       environment: { REDISCLI_AUTH: 'lab-only', REVISION: 'one' },
       healthcheck: { command: ['CMD-SHELL', 'REDISCLI_AUTH= redis-cli ping'], interval: '2s', retries: 15 },
       connections: { cache: { service: 'cache', endpoint: 'resp', hostEnv: 'CACHE_HOST', portEnv: 'CACHE_PORT' } },
@@ -54,6 +55,18 @@ const viaApi = (command) => ssh('b', `docker exec ${container('b', 'api')} sh -c
 mkdirSync(`${lab}/app`, { recursive: true });
 git('init', '-q', '-b', 'main');
 const first = commit('first');
+writeFileSync(`${lab}/api.env`, 'GREETING=from the env file\n', { mode: 0o600 });
+const pushed = deploy('env', 'push', '/lab/api.env');
+assert.equal(pushed.status, 0, pushed.stderr);
+assert.match(pushed.stdout, /pushed api\.env to .* on vm-b/);
+assert.doesNotMatch(pushed.stdout, /vm-a/);
+assert.equal(ssh('a', `test -e ${root}/env/api.env && echo present || echo absent`), 'absent');
+assert.equal(ssh('b', `cat ${root}/env/api.env`), 'GREETING=from the env file');
+writeFileSync(`${lab}/unused.env`, 'NOTHING=here\n', { mode: 0o600 });
+const unused = deploy('env', 'push', '/lab/unused.env');
+assert.notEqual(unused.status, 0);
+assert.match(unused.stderr, /lists unused\.env, so it has nowhere to go/);
+pass('env push sends a file only to the destination whose service lists it');
 
 let result = deploy();
 assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
@@ -103,6 +116,36 @@ for (const host of ['a', 'b']) {
   assert.equal(ssh(host, 'ls /home/deployer/Projects/app/.deploy-locks 2>/dev/null | grep -c operation || true'), '0');
 }
 pass('a candidate that fails on the second destination leaves both destinations on what was live and recorded as such');
+
+const status = succeed(deploy('status'));
+assert.match(status, /app on vm-a:\S+[\s\S]*cache +shared[\s\S]*\n\napp on vm-b:\S+[\s\S]*api +\w{7}/);
+assert.match(succeed(deploy('releases')), new RegExp(`api\\n\\* ${second}\\n- ${first}`));
+assert.equal(succeed(exec('api', 'printenv', 'CACHE_HOST')).split('\n').pop(), '10.76.0.1');
+assert.equal(succeed(exec('api', 'printenv', 'GREETING')).split('\n').pop(), 'from the env file');
+const unknown = exec('nope', 'true');
+assert.notEqual(unknown.status, 0);
+assert.match(unknown.stderr, /no service called "nope" on any destination/);
+pass('status and releases cover every destination, and exec finds the destination a service runs on');
+
+const notSelected = deploy('--service', 'nope');
+assert.notEqual(notSelected.status, 0);
+assert.match(notSelected.stderr, /--service names "nope"/);
+config.services.api.environment.REVISION = 'three';
+config.services.api.healthcheck = { command: ['CMD-SHELL', 'REDISCLI_AUTH= redis-cli ping'], interval: '2s', retries: 15 };
+const third = commit('third');
+result = deploy('--service', 'api');
+assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+assert.equal(state('b').services.api.current.commit, third);
+assert.equal(ssh('a', `docker inspect -f '{{.Id}}' deploy-${runtime}-shared-cache-1`), cacheBefore);
+pass('deploy --service api moves only api');
+
+result = deploy('rollback', '--service', 'api');
+assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+assert.equal(state('b').services.api.current.commit, second);
+assert.equal(viaApi('echo $REVISION'), 'two');
+assert.deepEqual(state('b').services.api.paths[second], ['connect 10.76.0.1:6391']);
+assert.equal(ssh('b', `cat /var/lib/deploy-network/${iface}/workloads`), `deploy-${runtime}_api_${second}-api-1`);
+pass('rollback across destinations moves api back on b and its boot record follows it');
 
 const boot = ssh('b', 'cat /proc/sys/kernel/random/boot_id');
 try { ssh('b', 'systemctl reboot'); } catch {}

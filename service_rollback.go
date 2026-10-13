@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -54,7 +55,7 @@ type rollbackStep struct {
 // planServiceRollback picks each service's target: the requested commit, or
 // its own previous release. Stateful services are never rolled back, since
 // their data does not go back with them.
-func planServiceRollback(runner Runner, layout Layout, state ServiceState, requested string, only []string) ([]rollbackStep, error) {
+func planServiceRollback(runner Runner, current ResolvedProject, layout Layout, state ServiceState, requested string, only []string) ([]rollbackStep, error) {
 	selected := only
 	if len(selected) == 0 {
 		for _, name := range slices.Sorted(maps.Keys(state.Services)) {
@@ -102,10 +103,10 @@ func planServiceRollback(runner Runner, layout Layout, state ServiceState, reque
 			}
 			return nil, err
 		}
+		if revoked := revokedPaths(current, name, record.Paths[release.Commit]); len(revoked) > 0 {
+			return nil, fmt.Errorf("%s %s used %s on the managed network, which the current config no longer provides; rolling back would not bring that access back, so deploy a release instead", name, release.Commit, strings.Join(revoked, ", "))
+		}
 		steps = append(steps, rollbackStep{name: name, live: *record.Current, target: release})
-	}
-	if len(steps) == 0 {
-		return nil, errors.New("nothing to roll back")
 	}
 
 	return steps, nil
@@ -113,12 +114,12 @@ func planServiceRollback(runner Runner, layout Layout, state ServiceState, reque
 
 func RunServiceRollback(options DeployOptions, repositoryPath, requested string, only []string) (exitCode int, err error) {
 	if options.Destination != "" {
-		return exitPreconditionNotMet, errors.New("version 2 takes its destination from the config; --destination applies to version 1")
+		return exitPreconditionNotMet, errors.New("version 2 takes its destinations from the config; --destination applies to version 1")
 	}
 	if options.ForceUnlock {
 		return exitPreconditionNotMet, errors.New("--force-unlock is for legacy version 1 lock metadata and does not apply to version 2")
 	}
-	resolved, name, destination, err := loadServiceConfig(repositoryPath, options.Environment)
+	resolved, destinations, err := loadTopology(repositoryPath, options.Environment)
 	if err != nil {
 		return exitPreconditionNotMet, err
 	}
@@ -127,20 +128,59 @@ func RunServiceRollback(options DeployOptions, repositoryPath, requested string,
 		return exitPreconditionNotMet, err
 	}
 
-	set, layout, err := lockServiceDestination(resolved, name, destination)
+	ctx := context.Background()
+	observations, err := observeTopology(ctx, &resolved, destinations, observeDestination)
 	if err != nil {
 		return exitPreconditionNotMet, err
 	}
-	runner := set.Runner(0)
-	state, err := destinationServiceState(runner, resolved, layout, name)
+	hosts, err := networkHosts(resolved)
 	if err != nil {
-		set.Release()
 		return exitPreconditionNotMet, err
 	}
-	steps, err := planServiceRollback(runner, layout, state, requested, only)
+	set, runs, err := lockTopology(ctx, resolved, destinations, observations)
 	if err != nil {
-		set.Release()
 		return exitPreconditionNotMet, err
+	}
+
+	// each named service is rolled back where it is recorded
+	plans := map[string][]rollbackStep{}
+	found := map[string]bool{}
+	total := 0
+	for _, run := range runs {
+		if run.state, err = destinationServiceState(run.runner, resolved, run.layout, run.name); err != nil {
+			set.Release()
+			return exitPreconditionNotMet, fmt.Errorf("destination %s: %w", run.name, err)
+		}
+		var local []string
+		for _, name := range only {
+			if _, recorded := run.state.Services[name]; recorded {
+				local = append(local, name)
+				found[name] = true
+			}
+		}
+		if len(only) > 0 && len(local) == 0 {
+			continue
+		}
+		steps, err := planServiceRollback(run.runner, run.view, run.layout, run.state, requested, local)
+		if err != nil {
+			set.Release()
+			if len(runs) > 1 {
+				err = fmt.Errorf("destination %s: %w", run.name, err)
+			}
+			return exitPreconditionNotMet, err
+		}
+		plans[run.name] = steps
+		total += len(steps)
+	}
+	for _, name := range only {
+		if !found[name] {
+			set.Release()
+			return exitPreconditionNotMet, fmt.Errorf("%s has never been deployed here, so there is nothing to roll back", name)
+		}
+	}
+	if total == 0 {
+		set.Release()
+		return exitPreconditionNotMet, errors.New("nothing to roll back")
 	}
 	if _, err := set.Begin("rollback", requested); err != nil {
 		set.Release()
@@ -150,31 +190,52 @@ func RunServiceRollback(options DeployOptions, repositoryPath, requested string,
 	defer set.Finish(&exitCode)
 
 	var affected, leaving, landing []string
-	for _, step := range steps {
-		affected = append(affected, step.name)
-		leaving = append(leaving, step.name+" "+step.live.Commit)
-		landing = append(landing, step.name+" "+step.target.Commit)
+	for _, run := range runs {
+		for _, step := range plans[run.name] {
+			affected = append(affected, step.name)
+			leaving = append(leaving, step.name+" "+step.live.Commit)
+			landing = append(landing, step.name+" "+step.target.Commit)
+		}
 	}
-	fmt.Printf("rolling %s back on %s: %s\n", resolved.Name, destination, strings.Join(landing, ", "))
+	where := runs[0].destination.String()
+	if len(runs) > 1 {
+		where = fmt.Sprintf("%d destinations", len(runs))
+	}
+	fmt.Printf("rolling %s back on %s: %s\n", resolved.Name, where, strings.Join(landing, ", "))
 	notifier.SendStage(stageRollingBack, resolved.Name, affected, StageVersions{Previous: strings.Join(landing, ", "), Incoming: strings.Join(leaving, ", ")})
 
-	executor := serviceExecutor{runner: runner, resolved: resolved, layout: layout}
 	var rolled []string
 	var failure error
-	for _, step := range steps {
-		if err := executor.rollService(step); err != nil {
-			failure = fmt.Errorf("%s: %w", step.name, err)
+	for _, run := range runs {
+		if failure != nil {
 			break
 		}
-		record := state.Services[step.name]
-		live, target := step.live, step.target
-		record.Previous, record.Current, record.Outcome = &live, &target, outcomeLive
-		state.Services[step.name] = record
-		rolled = append(rolled, step.name)
+		executor := serviceExecutor{runner: run.runner, resolved: run.view, layout: run.layout}
+		for _, step := range plans[run.name] {
+			if err := executor.rollService(step); err != nil {
+				failure = fmt.Errorf("%s: %w", step.name, err)
+				if len(runs) > 1 {
+					failure = fmt.Errorf("destination %s: %w", run.name, failure)
+				}
+				break
+			}
+			record := run.state.Services[step.name]
+			live, target := step.live, step.target
+			record.Previous, record.Current, record.Outcome = &live, &target, outcomeLive
+			run.state.Services[step.name] = record
+			rolled = append(rolled, step.name)
+		}
 	}
 
-	if _, err := WriteServiceState(runner, layout, state); err != nil {
-		return exitLiveButNeedsAHuman, fmt.Errorf("%s rolled back, but recording it failed, so deploy has lost track of what is live: %w", strings.Join(rolled, ", "), err)
+	for _, run := range runs {
+		if _, err := WriteServiceState(run.runner, run.layout, run.state); err != nil {
+			return exitLiveButNeedsAHuman, fmt.Errorf("%s rolled back, but recording it on %s failed, so deploy has lost track of what is live: %w", strings.Join(rolled, ", "), run.name, err)
+		}
+	}
+	if len(hosts) > 0 && len(rolled) > 0 {
+		if err := recordWorkloads(ctx, resolved, hosts, runs); err != nil {
+			return exitLiveButNeedsAHuman, fmt.Errorf("%s rolled back, but recording the containers to start at boot failed, so a reboot would leave them stopped: %w", strings.Join(rolled, ", "), err)
+		}
 	}
 	if failure != nil {
 		notifier.SendStage(stageRollbackFailed, resolved.Name, affected, StageVersions{Incoming: strings.Join(leaving, ", ")})
@@ -197,6 +258,9 @@ func RunServiceRollback(options DeployOptions, repositoryPath, requested string,
 func (executor *serviceExecutor) rollService(step rollbackStep) error {
 	compose := []string{"docker", "compose", "--file", executor.composeFile(step.target), "--project-name", step.target.Project}
 	up := append(slices.Clone(compose), "up", "--detach", "--wait", "--no-deps", step.name)
+	if executor.fixedPort(step.name) {
+		return executor.rollInPlace(step, compose, up)
+	}
 	if err := executor.runner.Stream(up, os.Stdout); err != nil {
 		executor.runner.Run(append(slices.Clone(compose), "rm", "--stop", "--force", step.name))
 		return fmt.Errorf("%s %s never became healthy, so it was removed and nothing was switched", step.target.Project, step.name)
@@ -204,6 +268,30 @@ func (executor *serviceExecutor) rollService(step rollbackStep) error {
 	fmt.Printf("  %s %s is up\n", step.target.Project, step.name)
 
 	return executor.switchService(step.name, step.live)
+}
+
+// rollInPlace rolls back a fixed-port service the way deploy replaces one:
+// the live release stops first, and starts again if the target does not
+// become healthy.
+func (executor *serviceExecutor) rollInPlace(step rollbackStep, compose, up []string) error {
+	live := []string{"docker", "compose", "--file", executor.composeFile(step.live), "--project-name", step.live.Project}
+	fmt.Printf("  %s publishes a fixed port, so it is replaced in place; it is down until %s is healthy\n", step.name, step.target.Commit)
+	if output, err := executor.runner.Run(append(slices.Clone(live), "stop", step.name)); err != nil {
+		return fmt.Errorf("stopping %s %s: %s", step.live.Project, step.name, firstLine(output))
+	}
+	if err := executor.runner.Stream(up, os.Stdout); err != nil {
+		executor.runner.Run(append(slices.Clone(compose), "rm", "--stop", "--force", step.name))
+		if output, startErr := executor.runner.Run(append(slices.Clone(live), "start", step.name)); startErr != nil {
+			return fmt.Errorf("%s %s never became healthy, and %s could not be started again either, so nothing is serving it: %s", step.target.Project, step.name, step.live.Project, firstLine(output))
+		}
+		return fmt.Errorf("%s %s never became healthy, so it was removed and %s is serving again", step.target.Project, step.name, step.live.Project)
+	}
+	if output, err := executor.runner.Run(append(slices.Clone(live), "rm", "--force", step.name)); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: could not remove the stopped %s from %s: %s\n", step.name, step.live.Project, firstLine(output))
+	}
+	fmt.Printf("  %s %s is up\n", step.target.Project, step.name)
+
+	return nil
 }
 
 // projectsOf matches every compose project deploy can have created for one

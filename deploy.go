@@ -27,6 +27,8 @@ type DeployOptions struct {
 	// BuildOnDest is nil when the flag was not given, so that an unset flag
 	// falls through to the config rather than silently overriding it with false.
 	BuildOnDest *bool
+	// Services limits a version 2 deploy to these services and release tasks.
+	Services []string
 }
 
 // Layout is where everything for one project lives on the destination. Volumes
@@ -94,6 +96,9 @@ func RunDeploy(options DeployOptions) (exitCode int, err error) {
 
 	if version, err := configVersion(repositoryPath); err == nil && version == 2 {
 		return RunServiceDeploy(options, repositoryPath)
+	}
+	if len(options.Services) > 0 {
+		return exitPreconditionNotMet, errors.New("--service needs a version 2 config; version 1 deploys every service as one release")
 	}
 
 	// a project with no config gets one here rather than from a separate command,
@@ -309,12 +314,20 @@ func RunDeploy(options DeployOptions) (exitCode int, err error) {
 
 func RunReleases(options DeployOptions) (int, error) {
 	if repositoryPath, isService := isServiceConfig(options); isService {
-		resolved, layout, runner, closeRunner, destination, err := openServiceProject(repositoryPath, options)
+		_, opened, closeAll, err := openServiceDestinations(repositoryPath, options)
 		if err != nil {
 			return exitPreconditionNotMet, err
 		}
-		defer closeRunner()
-		return runServiceReleases(runner, resolved, layout, destination)
+		defer closeAll()
+		for index, each := range opened {
+			if index > 0 {
+				fmt.Println()
+			}
+			if code, err := runServiceReleases(each.runner, each.view, each.layout, each.destination); err != nil {
+				return code, fmt.Errorf("destination %s: %w", each.name, err)
+			}
+		}
+		return exitOK, nil
 	}
 	startPath := options.Context
 	if startPath == "" {

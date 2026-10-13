@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"maps"
@@ -10,32 +11,100 @@ import (
 	"strings"
 )
 
-// openServiceProject is openProject for a version 2 config. Read only, so it
-// takes no lock; it still refuses state recorded for anyone else.
-func openServiceProject(repositoryPath string, options DeployOptions) (ResolvedProject, Layout, Runner, func(), Destination, error) {
+// openedDestination is one destination opened for a read-only command.
+type openedDestination struct {
+	name        string
+	destination Destination
+	view        ResolvedProject
+	runner      Runner
+	layout      Layout
+}
+
+// openServiceDestinations opens every destination of a version 2 config, or
+// only those named, for the read-only commands. It takes no lock, and still
+// refuses state recorded for anyone else.
+func openServiceDestinations(repositoryPath string, options DeployOptions, only ...string) (ResolvedProject, []openedDestination, func(), error) {
 	if options.Destination != "" {
-		return ResolvedProject{}, Layout{}, nil, nil, Destination{}, errors.New("version 2 takes its destination from the config; --destination applies to version 1")
+		return ResolvedProject{}, nil, nil, errors.New("version 2 takes its destinations from the config; --destination applies to version 1")
 	}
-	resolved, name, destination, err := loadServiceConfig(repositoryPath, options.Environment)
+	resolved, destinations, err := loadTopology(repositoryPath, options.Environment)
 	if err != nil {
-		return ResolvedProject{}, Layout{}, nil, nil, Destination{}, err
+		return ResolvedProject{}, nil, nil, err
 	}
-	runner, closeRunner, err := OpenRunner(destination)
-	if err != nil {
-		return ResolvedProject{}, Layout{}, nil, nil, Destination{}, err
+	var opened []openedDestination
+	var closers []func()
+	closeAll := func() {
+		for index := len(closers) - 1; index >= 0; index-- {
+			closers[index]()
+		}
 	}
-	destination, err = AbsoluteDestination(runner, destination)
-	if err != nil {
-		closeRunner()
-		return ResolvedProject{}, Layout{}, nil, nil, Destination{}, err
-	}
-	layout := NewLayout(destination.Path, resolved.RuntimeID())
-	if _, _, err := readDestinationState(runner, resolved, layout, name); err != nil {
-		closeRunner()
-		return ResolvedProject{}, Layout{}, nil, nil, Destination{}, err
+	for _, name := range slices.Sorted(maps.Keys(destinations)) {
+		if len(only) > 0 && !slices.Contains(only, name) {
+			continue
+		}
+		runner, closeRunner, err := OpenRunner(destinations[name])
+		if err != nil {
+			closeAll()
+			return ResolvedProject{}, nil, nil, fmt.Errorf("destination %s: %w", name, err)
+		}
+		closers = append(closers, closeRunner)
+		destination, err := AbsoluteDestination(runner, destinations[name])
+		if err != nil {
+			closeAll()
+			return ResolvedProject{}, nil, nil, fmt.Errorf("destination %s: %w", name, err)
+		}
+		layout := NewLayout(destination.Path, resolved.RuntimeID())
+		if _, _, err := readDestinationState(runner, resolved, layout, name); err != nil {
+			closeAll()
+			return ResolvedProject{}, nil, nil, fmt.Errorf("destination %s: %w", name, err)
+		}
+		opened = append(opened, openedDestination{name: name, destination: destination, view: resolved.on(name), runner: runner, layout: layout})
 	}
 
-	return resolved, layout, runner, closeRunner, destination, nil
+	return resolved, opened, closeAll, nil
+}
+
+// openServiceProject opens a version 2 config's only destination.
+func openServiceProject(repositoryPath string, options DeployOptions) (ResolvedProject, Layout, Runner, func(), Destination, error) {
+	_, opened, closeAll, err := openServiceDestinations(repositoryPath, options)
+	if err != nil {
+		return ResolvedProject{}, Layout{}, nil, nil, Destination{}, err
+	}
+	if len(opened) != 1 {
+		closeAll()
+		return ResolvedProject{}, Layout{}, nil, nil, Destination{}, errors.New("this command works on one destination for now")
+	}
+
+	return opened[0].view, opened[0].layout, opened[0].runner, closeAll, opened[0].destination, nil
+}
+
+// openServiceFor opens the destination a service runs on: the one the config
+// places it on, or for a service the config dropped, the one whose state still
+// records it.
+func openServiceFor(repositoryPath string, options DeployOptions, serviceName string) (ResolvedProject, Layout, Runner, func(), error) {
+	resolved, opened, closeAll, err := openServiceDestinations(repositoryPath, options)
+	if err != nil {
+		return ResolvedProject{}, Layout{}, nil, nil, err
+	}
+	placed := resolved.nodeDestination(serviceName)
+	if placed == "" && len(opened) == 1 {
+		// the one destination says what it does have
+		return opened[0].view, opened[0].layout, opened[0].runner, closeAll, nil
+	}
+	for _, candidate := range opened {
+		if placed != "" {
+			if candidate.name == placed {
+				return candidate.view, candidate.layout, candidate.runner, closeAll, nil
+			}
+			continue
+		}
+		if state, _, err := ReadServiceState(candidate.runner, candidate.layout); err == nil && state.Services[serviceName].Current != nil {
+			return candidate.view, candidate.layout, candidate.runner, closeAll, nil
+		}
+	}
+	closeAll()
+
+	return ResolvedProject{}, Layout{}, nil, nil, fmt.Errorf("no service called %q on any destination. this project has %s", serviceName, strings.Join(ServiceNames(resolved.Services), ", "))
 }
 
 // inspectedServiceState reads version 2 state for the inspection commands. A version 1
@@ -226,31 +295,46 @@ func listedProject(runner Runner, destinationPath, id string) (name, environment
 	return state.Name, state.Environment, state.Current, deployed, true
 }
 
-// runServiceEnvPush places an env file under the lock and an operation record.
+// runServiceEnvPush places an env file on each destination whose services or
+// release tasks list it, and nowhere else, under the locks and one operation.
 // A destination that was never deployed is claimed per service here, the way
 // version 1 env push claims an environment.
 func runServiceEnvPush(repositoryPath string, options DeployOptions, localPath string, contents []byte) (exitCode int, err error) {
 	if options.Destination != "" {
-		return exitPreconditionNotMet, errors.New("version 2 takes its destination from the config; --destination applies to version 1")
+		return exitPreconditionNotMet, errors.New("version 2 takes its destinations from the config; --destination applies to version 1")
 	}
 	if options.ForceUnlock {
 		return exitPreconditionNotMet, errors.New("--force-unlock is for legacy version 1 lock metadata and does not apply to version 2")
 	}
-	resolved, name, destination, err := loadServiceConfig(repositoryPath, options.Environment)
+	resolved, destinations, err := loadTopology(repositoryPath, options.Environment)
 	if err != nil {
-		return exitPreconditionNotMet, err
-	}
-	set, layout, err := lockServiceDestination(resolved, name, destination)
-	if err != nil {
-		return exitPreconditionNotMet, err
-	}
-	runner := set.Runner(0)
-	state, err := destinationServiceState(runner, resolved, layout, name)
-	if err != nil {
-		set.Release()
 		return exitPreconditionNotMet, err
 	}
 	file := path.Base(localPath)
+	needing := envFileDestinations(resolved, file)
+	if len(needing) == 0 {
+		return exitPreconditionNotMet, fmt.Errorf("no service or release task in %s lists %s, so it has nowhere to go", resolved.Environment, file)
+	}
+	selected := map[string]Destination{}
+	for _, name := range needing {
+		selected[name] = destinations[name]
+	}
+
+	ctx := context.Background()
+	observations, err := observeTopology(ctx, &resolved, destinations, observeDestination)
+	if err != nil {
+		return exitPreconditionNotMet, err
+	}
+	set, runs, err := lockTopology(ctx, resolved, selected, observations)
+	if err != nil {
+		return exitPreconditionNotMet, err
+	}
+	for _, run := range runs {
+		if run.state, err = destinationServiceState(run.runner, resolved, run.layout, run.name); err != nil {
+			set.Release()
+			return exitPreconditionNotMet, fmt.Errorf("destination %s: %w", run.name, err)
+		}
+	}
 	if _, err := set.Begin("env push", file); err != nil {
 		set.Release()
 		return exitPreconditionNotMet, err
@@ -258,20 +342,36 @@ func runServiceEnvPush(repositoryPath string, options DeployOptions, localPath s
 	set.ReleaseOnSignal()
 	defer set.Finish(&exitCode)
 
-	if state.Generation == 0 {
-		if err := runner.MkdirAll(layout.Root); err != nil {
-			return exitDeployFailed, err
+	for _, run := range runs {
+		if run.state.Generation == 0 {
+			if err := run.runner.MkdirAll(run.layout.Root); err != nil {
+				return exitDeployFailed, err
+			}
+			if _, err := WriteServiceState(run.runner, run.layout, run.state); err != nil {
+				return exitDeployFailed, err
+			}
 		}
-		if _, err := WriteServiceState(runner, layout, state); err != nil {
-			return exitDeployFailed, err
+		if err := PushEnvFile(run.runner, run.layout, file, contents); err != nil {
+			return exitDeployFailed, fmt.Errorf("destination %s: %w", run.name, err)
 		}
+		fmt.Printf("pushed %s to %s on %s\n", file, run.layout.EnvDirectory(), run.runner.Describe())
 	}
-	if err := PushEnvFile(runner, layout, file, contents); err != nil {
-		return exitDeployFailed, err
-	}
-	fmt.Printf("pushed %s to %s on %s\n", file, layout.EnvDirectory(), runner.Describe())
 
 	return exitOK, nil
+}
+
+// envFileDestinations names the destinations whose services or release tasks
+// list an env file, so a secret only goes where something reads it.
+func envFileDestinations(resolved ResolvedProject, file string) []string {
+	var names []string
+	for _, node := range topologyNodes(resolved) {
+		if slices.Contains(node.Env, file) && !slices.Contains(names, node.Destination) {
+			names = append(names, node.Destination)
+		}
+	}
+	slices.Sort(names)
+
+	return names
 }
 
 // repositoryFor finds the repository the way every command does.

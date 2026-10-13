@@ -63,6 +63,9 @@ type ServiceRecord struct {
 	Previous *ServiceRelease `json:"previous,omitempty"`
 	Releases []string        `json:"releases,omitempty"`
 	Outcome  string          `json:"outcome"`
+	// Paths records, per retained release, what it needed from the managed
+	// network, so a rollback never brings back access the network revoked.
+	Paths map[string][]string `json:"paths,omitempty"`
 }
 
 type ServiceRelease struct {
@@ -196,9 +199,21 @@ func (record ServiceRecord) validate(project, name string) error {
 			return fmt.Errorf("invalid retained release %q", commit)
 		}
 	}
+	for _, commit := range slices.Sorted(maps.Keys(record.Paths)) {
+		if !commitPattern.MatchString(commit) {
+			return fmt.Errorf("invalid release %q in paths", commit)
+		}
+		for _, path := range record.Paths[commit] {
+			if !networkPathPattern.MatchString(path) {
+				return fmt.Errorf("release %s has an invalid network path %q", commit, path)
+			}
+		}
+	}
 
 	return nil
 }
+
+var networkPathPattern = regexp.MustCompile(`^(connect|publish) (25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])(\.(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])){3}:[1-9][0-9]{0,4}$`)
 
 func (run TaskRecord) validate() error {
 	if !operationIDPattern.MatchString(run.Operation) {
