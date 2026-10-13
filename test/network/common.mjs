@@ -1,4 +1,4 @@
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
 
@@ -25,3 +25,16 @@ export async function until(label, predicate, timeout = 60000) {
   throw new Error(`timed out: ${label}`, { cause: error });
 }
 export function pass(message) { console.log(`PASS ${message}`); }
+
+// inContainer runs a command in the tools container, where the deploy binary
+// and the deployer ssh config live; helper.mjs writes both.
+export function inContainer(args, input = '') {
+  const container = process.env.DEPLOY_NETWORK_CONTAINER;
+  const result = spawnSync('docker', ['exec', '-i', container, ...args], { input, encoding: 'utf8', timeout: 240000 });
+  return { status: result.status, stdout: result.stdout.trim(), stderr: result.stderr.trim() };
+}
+export const asDeployer = (host, command, input = '') => inContainer(['/lab/bin/ssh', `vm-${host}`, command], input);
+export function succeed(result) {
+  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+  return result.stdout;
+}

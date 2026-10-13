@@ -42,7 +42,7 @@ trap 'exit 143' TERM
 CGO_ENABLED=0 go -C "$here/../.." build -o "$DEPLOY_NETWORK_LAB/deploy" . > "$output/build.log" 2>&1
 docker build -t "$DEPLOY_NETWORK_IMAGE" "$here" >> "$output/build.log" 2>&1
 bash "$here/lab.sh" up > "$output/boot.log" 2>&1
-for phase in ${DEPLOY_NETWORK_PHASES:-setup network lifecycle locks failures helper}; do
+for phase in ${DEPLOY_NETWORK_PHASES:-setup network lifecycle locks failures helper reconcile}; do
   echo "RUN $phase"
   node "$here/$phase.mjs" 2>&1 | tee "$output/$phase.log"
 done

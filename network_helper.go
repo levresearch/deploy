@@ -96,11 +96,13 @@ install -o root -g root -m 0440 "$rules" "$sudoers"
 rm -f "$rules"
 `
 
-// networkHost is one host of the managed network and the destination used to
-// reach it.
+// networkHost is one host of the managed network, the destinations on it and
+// the one used to reach it.
 type networkHost struct {
-	Name   string
-	Target string
+	Name         string
+	Target       string
+	Destinations []string
+	Network      HostNetwork
 }
 
 func networkHosts(resolved ResolvedProject) ([]networkHost, error) {
@@ -110,6 +112,7 @@ func networkHosts(resolved ResolvedProject) ([]networkHost, error) {
 	}
 	var hosts []networkHost
 	for _, host := range sortedHosts(networks) {
+		entry := networkHost{Name: host, Network: networks[host]}
 		for _, name := range slices.Sorted(maps.Keys(resolved.Destinations)) {
 			if _, peer := resolved.Network.Peers[name]; !peer || resolved.destinationHost(name) != host {
 				continue
@@ -121,26 +124,38 @@ func networkHosts(resolved ResolvedProject) ([]networkHost, error) {
 			if !destination.IsRemote() {
 				return nil, fmt.Errorf("destination %s is local; the managed network is set up over ssh", name)
 			}
-			hosts = append(hosts, networkHost{Name: host, Target: destination.Host})
-			break
+			if entry.Target == "" {
+				entry.Target = destination.Host
+			}
+			entry.Destinations = append(entry.Destinations, name)
 		}
+		hosts = append(hosts, entry)
 	}
 	return hosts, nil
 }
 
 func runNetwork(args []string) int {
-	if len(args) < 1 || args[0] != "bootstrap" {
-		fatal("usage: deploy network bootstrap")
+	if len(args) < 1 || !slices.Contains([]string{"bootstrap", "status", "plan", "apply"}, args[0]) {
+		fatal("usage: deploy network bootstrap|status|plan|apply")
 		return exitPreconditionNotMet
 	}
-	flags := newFlagSet("network bootstrap")
+	flags := newFlagSet("network " + args[0])
 	var context, environment string
 	stringFlag(flags, &context, "context", "C", ".", "directory containing .deploy.json")
-	stringFlag(flags, &environment, "environment", "e", defaultEnvironmentName, "environment whose hosts to prepare")
+	stringFlag(flags, &environment, "environment", "e", defaultEnvironmentName, "environment whose network to use")
 	if proceed, code := parseCommandFlags(flags, args[1:]); !proceed {
 		return code
 	}
-	exitCode, err := RunNetworkBootstrap(context, environment, os.Stdin, os.Stdout)
+	var exitCode int
+	var err error
+	switch args[0] {
+	case "bootstrap":
+		exitCode, err = RunNetworkBootstrap(context, environment, os.Stdin, os.Stdout)
+	case "status", "plan":
+		exitCode, err = RunNetworkInspect(context, environment, args[0], os.Stdout)
+	case "apply":
+		exitCode, err = RunNetworkApply(context, environment, os.Stdout)
+	}
 	if err != nil {
 		fatal("%v", err)
 	}

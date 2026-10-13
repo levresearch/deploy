@@ -1,14 +1,12 @@
-import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { mkdirSync, writeFileSync } from 'node:fs';
-import { ssh, assert, until, pass } from './common.mjs';
+import { ssh, assert, until, pass, inContainer, asDeployer, succeed } from './common.mjs';
 
 // the real deploy binary bootstraps the helper as an unprivileged user with
 // password sudo, then the helper is driven only through sudo -n, the way deploy
 // will drive it. wg0 and DEPLOY-LAB from the earlier phases stand in for
 // network state deploy does not own.
 const lab = process.env.DEPLOY_NETWORK_LAB;
-const container = process.env.DEPLOY_NETWORK_CONTAINER;
 const image = 'redis@sha256:858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499';
 const helperPath = '/usr/local/libexec/deploy-network';
 const runtime = 'fb00000a';
@@ -53,18 +51,8 @@ writeFileSync(`${lab}/project/.deploy.json`, JSON.stringify({
   },
 }));
 
-function inContainer(args, input = '') {
-  const result = spawnSync('docker', ['exec', '-i', container, ...args], { input, encoding: 'utf8', timeout: 240000 });
-  return { status: result.status, stdout: result.stdout.trim(), stderr: result.stderr.trim() };
-}
 const deploy = (...args) => inContainer(['/lab/bin/deploy', ...args]);
-// asDeployer runs one command on a guest as the unprivileged deploy user.
-const asDeployer = (host, command, input = '') => inContainer(['/lab/bin/ssh', `vm-${host}`, command], input);
 const helper = (host, verb, input = '') => asDeployer(host, `sudo -n ${helperPath} ${verb}`, input);
-const succeed = result => {
-  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
-  return result.stdout;
-};
 const refused = (result, reason) => {
   assert.notEqual(result.status, 0, result.stdout);
   assert.match(result.stderr, reason);
