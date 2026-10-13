@@ -68,27 +68,113 @@ func RenderServiceRelease(resolved ResolvedProject, layout Layout, name, commit 
 	if !found || service.IsStateful() {
 		return nil, fmt.Errorf("%s is not a stateless service", name)
 	}
-	for _, endpoint := range slices.Sorted(maps.Keys(service.Endpoints)) {
-		if service.Endpoints[endpoint].HostPort != 0 {
-			return nil, fmt.Errorf("%s endpoint %s publishes a host port, which needs managed networking that is not available yet", name, endpoint)
-		}
-	}
-
-	environment, err := connectionEnvironment(resolved, name, service)
-	if err != nil {
-		return nil, err
-	}
-	if environment != nil {
-		service.Extra = maps.Clone(service.Extra)
-		service.Extra["environment"] = environment
-	}
 
 	return renderProject(resolved, layout, ServiceReleaseProject(resolved.RuntimeID(), name, commit), map[string]Service{name: service}, commit)
 }
 
+// workloadRestart keeps Docker from starting a network workload at boot or on
+// a daemon restart, before its private address, routes and firewall exist.
+// The network helper starts it once they do; Docker still restarts it after a
+// crash.
+const workloadRestart = "on-failure"
+
+// topologyService adds what the topology decides to one service or release
+// task before it is rendered: its connection environment, the endpoints other
+// hosts reach and, for a service on the managed network, its restart policy.
+func topologyService(resolved ResolvedProject, name string, service Service) (Service, error) {
+	if resolved.Version != 2 {
+		return service, nil
+	}
+	environment, err := connectionEnvironment(resolved, name, service)
+	if err != nil {
+		return Service{}, err
+	}
+	ports := crossHostPorts(resolved, name, service)
+	workload := networkWorkload(resolved, name, service)
+	if environment == nil && len(ports) == 0 && !workload {
+		return service, nil
+	}
+
+	service.Extra = maps.Clone(service.Extra)
+	if service.Extra == nil {
+		service.Extra = map[string]json.RawMessage{}
+	}
+	if environment != nil {
+		service.Extra["environment"] = environment
+	}
+	if len(ports) > 0 {
+		if _, set := service.Extra["ports"]; set {
+			return Service{}, fmt.Errorf("%s: raw ports cannot be combined with endpoints reached from another host", name)
+		}
+		service.Extra["ports"], _ = json.Marshal(ports)
+	}
+	if workload {
+		if _, set := service.Extra["restart"]; set {
+			return Service{}, fmt.Errorf("%s is on the managed network, so deploy sets its restart policy and starts it once the network is up; remove restart", name)
+		}
+		service.Extra["restart"], _ = json.Marshal(workloadRestart)
+	}
+
+	return service, nil
+}
+
+// networkWorkload reports whether a service publishes onto the managed network
+// or consumes across it, which is what makes the network helper start it.
+func networkWorkload(resolved ResolvedProject, name string, service Service) bool {
+	if _, task := resolved.Release[name]; task {
+		return false
+	}
+
+	return len(crossHostPorts(resolved, name, service)) > 0 || crossesHosts(resolved, service)
+}
+
+// crossesHosts reports whether a service consumes a provider on another host.
+func crossesHosts(resolved ResolvedProject, service Service) bool {
+	for _, connection := range service.Connections {
+		if provider, found := resolved.Services[connection.Service]; found && resolved.destinationHost(provider.Destination) != resolved.destinationHost(service.Destination) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// crossHostPorts publishes each endpoint a consumer on another host reaches,
+// bound to the provider's private address and nowhere else. An endpoint only
+// its own host uses is not published at all.
+func crossHostPorts(resolved ResolvedProject, name string, service Service) []string {
+	if resolved.Network == nil {
+		return nil
+	}
+	reached := map[string]bool{}
+	nodes := topologyNodes(resolved)
+	for _, consumer := range slices.Sorted(maps.Keys(nodes)) {
+		for _, connection := range nodes[consumer].Connections {
+			if connection.Service == name && resolved.destinationHost(nodes[consumer].Destination) != resolved.destinationHost(service.Destination) {
+				reached[connection.Endpoint] = true
+			}
+		}
+	}
+	peer, found := resolved.Network.Peers[service.Destination]
+	if !found {
+		return nil
+	}
+	var ports []string
+	for _, endpoint := range slices.Sorted(maps.Keys(reached)) {
+		published := service.Endpoints[endpoint]
+		if published.HostPort == 0 {
+			continue
+		}
+		ports = append(ports, fmt.Sprintf("%s:%d:%d/tcp", peer.Address, published.HostPort, published.Port))
+	}
+
+	return ports
+}
+
 // connectionEnvironment adds each connection's host and port to the service's
-// own environment. On one host the provider is reached by its service name on
-// the project network.
+// own environment. A provider on the same host is reached by its service name
+// on the project network; one on another host by its private address and
+// published port.
 func connectionEnvironment(resolved ResolvedProject, name string, service Service) (json.RawMessage, error) {
 	if len(service.Connections) == 0 {
 		return nil, nil
@@ -102,11 +188,20 @@ func connectionEnvironment(resolved ResolvedProject, name string, service Servic
 		if !found || !hasEndpoint {
 			return nil, fmt.Errorf("%s connection %s requires a named service endpoint", name, label)
 		}
-		if provider.Destination != service.Destination {
-			return nil, fmt.Errorf("%s connection %s crosses destinations, which is not available yet", name, label)
+		if resolved.destinationHost(provider.Destination) == resolved.destinationHost(service.Destination) {
+			values[connection.HostEnv] = connection.Service
+			values[connection.PortEnv] = strconv.Itoa(endpoint.Port)
+			continue
 		}
-		values[connection.HostEnv] = connection.Service
-		values[connection.PortEnv] = strconv.Itoa(endpoint.Port)
+		peer, peered := NetworkPeer{}, false
+		if resolved.Network != nil {
+			peer, peered = resolved.Network.Peers[provider.Destination]
+		}
+		if !peered || endpoint.HostPort == 0 {
+			return nil, fmt.Errorf("%s connection %s crosses hosts and needs a network peer for %s and a hostPort on %s", name, label, provider.Destination, connection.Endpoint)
+		}
+		values[connection.HostEnv] = peer.Address
+		values[connection.PortEnv] = strconv.Itoa(endpoint.HostPort)
 	}
 
 	existing := service.Extra["environment"]
