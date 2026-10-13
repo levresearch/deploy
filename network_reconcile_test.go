@@ -52,7 +52,7 @@ func TestObservationParsingAcceptsOnlyThisHelper(t *testing.T) {
 	if err != nil || observed.WireGuard != "inactive" || observed.Link {
 		t.Fatalf("missing units: %+v %v", observed, err)
 	}
-	if _, err := parseHostObservation(strings.Replace(unownedObservation(), "deploy-network 1", "deploy-network 0", 1)); !errors.Is(err, errNetworkHelperMissing) {
+	if _, err := parseHostObservation(strings.Replace(unownedObservation(), "deploy-network 2", "deploy-network 1", 1)); !errors.Is(err, errNetworkHelperMissing) {
 		t.Fatalf("another helper version was accepted: %v", err)
 	}
 	for name, raw := range map[string]string{

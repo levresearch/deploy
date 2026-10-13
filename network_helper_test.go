@@ -172,3 +172,56 @@ func TestNetworkHostsReachEachHostThroughOneDestination(t *testing.T) {
 		t.Fatalf("networks %+v", hosts)
 	}
 }
+
+func TestWorkloadsAreTheLiveNetworkServicesOfOneHostInReadinessOrder(t *testing.T) {
+	resolved := topologyResolved(t)
+	cache := Service{Destination: "app", Image: "example/cache"}
+	resolved.Services["cache"] = cache
+	live := map[string]ServiceRelease{
+		"db":    sharedRelease(resolved.RuntimeID(), "abcdef1", ""),
+		"api":   serviceRelease(resolved.RuntimeID(), "api", "abcdef1", ""),
+		"cache": serviceRelease(resolved.RuntimeID(), "cache", "abcdef1", ""),
+	}
+	data, err := workloadContainers(resolved, resolved.destinationHost("data"), live)
+	if err != nil || strings.Join(data, ",") != "deploy-1234abcd-shared-db-1" {
+		t.Fatalf("data host workloads %v %v", data, err)
+	}
+	app, err := workloadContainers(resolved, resolved.destinationHost("app"), live)
+	if err != nil || strings.Join(app, ",") != "deploy-1234abcd_api_abcdef1-api-1" {
+		t.Fatalf("app host workloads %v %v", app, err)
+	}
+	if got := workloadsInput(resolved, app); got != "runtime 1234abcd\nenvironment production\nworkload deploy-1234abcd_api_abcdef1-api-1\n" {
+		t.Fatalf("input %q", got)
+	}
+
+	live["api"] = legacyRelease(resolved.RuntimeID(), "abcdef1")
+	if _, err := workloadContainers(resolved, resolved.destinationHost("app"), live); err == nil || !strings.Contains(err.Error(), "deploy it again") {
+		t.Fatalf("a legacy commit stack was handed to the helper: %v", err)
+	}
+	delete(live, "api")
+	if app, err := workloadContainers(resolved, resolved.destinationHost("app"), live); err != nil || len(app) != 0 {
+		t.Fatalf("a service that never went live was listed: %v %v", app, err)
+	}
+}
+
+func TestTheHelperAcceptsOnlyThisRuntimesWorkloads(t *testing.T) {
+	identity := "runtime 1234abcd\nenvironment production\n"
+	for name, input := range map[string]string{
+		"another runtime":   identity + "workload deploy-1234abce-shared-db-1\n",
+		"another env":       identity + "workload deploy-1234abcd-staging-shared-db-1\n",
+		"no replica number": identity + "workload deploy-1234abcd-shared-db\n",
+		"shell":             identity + "workload deploy-1234abcd-shared-db-1;reboot\n",
+		"twice":             identity + "workload deploy-1234abcd-shared-db-1\nworkload deploy-1234abcd-shared-db-1\n",
+		"network fields":    identity + "cidr 10.77.0.0/24\nworkload deploy-1234abcd-shared-db-1\n",
+	} {
+		if _, failure, err := runHelper(t, input, "workloads"); err == nil || !strings.Contains(failure, "refused") || strings.Contains(failure, "needs root") {
+			t.Fatalf("%s was accepted: %s", name, failure)
+		}
+	}
+	if os.Getuid() != 0 {
+		valid := identity + "workload deploy-1234abcd-shared-db-1\nworkload deploy-1234abcd_api_abcdef1-api-1\n"
+		if _, failure, err := runHelper(t, valid, "workloads"); err == nil || !strings.Contains(failure, "needs root") {
+			t.Fatalf("valid workloads did not reach the root check: %s", failure)
+		}
+	}
+}

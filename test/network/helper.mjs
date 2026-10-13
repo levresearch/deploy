@@ -74,7 +74,7 @@ assert.match(again.stdout, /vm-a: helper \w+ already installed\nvm-b: helper \w+
 pass('bootstrap installs the helper with operator sudo once and is a no-op afterwards');
 
 for (const host of ['a', 'b']) {
-  assert.match(succeed(helper(host, 'version')), /^deploy-network 1 [0-9a-f]{64}$/);
+  assert.match(succeed(helper(host, 'version')), /^deploy-network 2 [0-9a-f]{64}$/);
   assert.equal(ssh(host, `stat -c '%U %G %a' ${helperPath} /etc/sudoers.d/deploy-network`), 'root root 755\nroot root 440');
   refused(asDeployer(host, 'sudo -n true'), /password is required|a terminal is required/);
   refused(asDeployer(host, `sudo -n ${helperPath} check`), /password is required|a terminal is required|not allowed/);

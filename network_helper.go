@@ -25,12 +25,12 @@ var networkHelper []byte
 const (
 	networkHelperPath    = "/usr/local/libexec/deploy-network"
 	networkHelperSudoers = "/etc/sudoers.d/deploy-network"
-	networkHelperVersion = 1
+	networkHelperVersion = 2
 )
 
 // networkHelperVerbs are the only commands the sudoers rule allows. check and
 // restore are left out: the first needs no root and the second is for systemd.
-var networkHelperVerbs = []string{"version", "observe", "enroll", "apply", "remove"}
+var networkHelperVerbs = []string{"version", "observe", "enroll", "apply", "remove", "workloads"}
 
 func networkHelperChecksum() string {
 	digest := sha256.Sum256(networkHelper)
@@ -259,4 +259,44 @@ func installNetworkHelper(runner *SSHRunner) error {
 	}
 	return runner.Interactive([]string{"sudo", "sh", "-c", networkHelperInstall, "deploy-network-bootstrap",
 		upload, networkHelperChecksum(), networkHelperPath, networkHelperSudoers, strings.Join(networkHelperVerbs, " ")})
+}
+
+// workloadContainers lists, in readiness order, the containers on one host
+// that the network helper starts once the network is up: each live service
+// there that is a network workload.
+func workloadContainers(resolved ResolvedProject, host string, live map[string]ServiceRelease) ([]string, error) {
+	waves, err := readinessWaves(resolved)
+	if err != nil {
+		return nil, err
+	}
+	containers := []string{}
+	for _, wave := range waves {
+		for _, name := range wave {
+			service, found := resolved.Services[name]
+			if !found || resolved.destinationHost(service.Destination) != host || !networkWorkload(resolved, name, service) {
+				continue
+			}
+			release, deployed := live[name]
+			if !deployed {
+				continue
+			}
+			if !validArtifacts(resolved.RuntimeID(), name, service.IsStateful(), release) || release.Project == legacyRelease(resolved.RuntimeID(), release.Commit).Project {
+				return nil, fmt.Errorf("%s runs from %s, which the network helper cannot start; deploy it again first", name, release.Project)
+			}
+			containers = append(containers, release.Project+"-"+name+"-1")
+		}
+	}
+
+	return containers, nil
+}
+
+// workloadsInput is what the helper's workloads verb reads.
+func workloadsInput(resolved ResolvedProject, containers []string) string {
+	var input strings.Builder
+	input.WriteString(identityInput(resolved))
+	for _, container := range containers {
+		input.WriteString("workload " + container + "\n")
+	}
+
+	return input.String()
 }

@@ -18,7 +18,10 @@
 #             a failed apply puts back the files and state it had before; a
 #             changing one keeps the files it replaced in previous/.
 #   remove    take down and delete everything the runtime id owns
-#   restore   reload the owned chains at boot (run by systemd, not deploy)
+#   workloads record the containers restore starts, in order, once the
+#             network is up; Docker itself never starts them at boot
+#   restore   reload the owned chains at boot and start the recorded
+#             workloads (run by systemd, not deploy)
 #
 # checks are written as `test && test || refuse`, which is the intent here: any
 # failing test refuses.
@@ -28,7 +31,7 @@ umask 077
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 export LC_ALL=C
 
-readonly helper_version=1
+readonly helper_version=2
 readonly helper_path=/usr/local/libexec/deploy-network
 readonly state_root=/var/lib/deploy-network
 readonly config_root=/etc/wireguard
@@ -43,7 +46,7 @@ refuse() {
 # --- input --------------------------------------------------------------------
 
 runtime='' environment='' cidr='' address='' listen=''
-peers=() access=()
+peers=() access=() workloads=()
 
 set_once() {
   local -n field=$1
@@ -68,6 +71,7 @@ read_desired() {
     runtime | environment | cidr | address | listen) set_once "$key" "$value" ;;
     peer) peers+=("$value") ;;
     access) access+=("$value") ;;
+    workload) workloads+=("$value") ;;
     *) refuse "unknown field $key on line $count" ;;
     esac
   done <<<"$input"
@@ -102,8 +106,8 @@ wireguard_key_pattern='^[A-Za-z0-9+/]{42}[AEIMQUYcgkosw048]=$'
 endpoint_pattern='^[a-zA-Z0-9][a-zA-Z0-9._-]{0,252}:[1-9][0-9]{0,4}$'
 
 # validate checks the fields a verb needs. scope is identity (runtime and
-# environment), interface (plus cidr, address and listen port) or full (plus
-# peers and access).
+# environment), workloads (identity plus workload names), interface (plus cidr,
+# address and listen port) or full (plus peers and access).
 validate() {
   local scope=$1
   [ -n "$runtime" ] || refuse 'runtime is required'
@@ -115,11 +119,23 @@ validate() {
   else
     [ "$runtime" = "${runtime:0:8}-$environment" ] || refuse 'runtime id does not match the environment'
   fi
-  if [ "$scope" = identity ]; then
+  if [ "$scope" = identity ] || [ "$scope" = workloads ]; then
     [ -z "$cidr$address$listen" ] && [ "${#peers[@]}" -eq 0 ] && [ "${#access[@]}" -eq 0 ] ||
-      refuse 'this verb takes only runtime and environment'
+      refuse 'this verb takes only runtime, environment and workloads'
+    [ "$scope" = workloads ] || [ "${#workloads[@]}" -eq 0 ] || refuse 'this verb takes no workloads'
+    [ "$scope" = workloads ] || return 0
+    [ "${#workloads[@]}" -le 64 ] || refuse 'at most 64 workloads'
+    local workload seen=' '
+    for workload in "${workloads[@]}"; do
+      # only the container names deploy's own compose projects produce
+      [[ $workload =~ ^deploy-$runtime(_[a-z][a-z0-9-]*_[0-9a-f]{7}|-shared)-[a-z][a-z0-9-]*-[1-9][0-9]{0,2}$ ]] ||
+        refuse "workload $workload is not a container of this runtime"
+      [[ $seen != *" $workload "* ]] || refuse "workload $workload given twice"
+      seen+="$workload "
+    done
     return
   fi
+  [ "${#workloads[@]}" -eq 0 ] || refuse 'this verb takes no workloads'
 
   [[ $cidr =~ ^(.+)/([1-9][0-9]?)$ ]] || refuse 'invalid cidr'
   local base=${BASH_REMATCH[1]}
@@ -595,6 +611,41 @@ verb_apply() {
   fi
 }
 
+# start_workloads starts each recorded container that is not running, in the
+# recorded order. one that fails is reported and the rest still start.
+start_workloads() {
+  local list=$state_root/$1/workloads workload running
+  [ -f "$list" ] && [ ! -L "$list" ] || return 0
+  while read -r workload; do
+    [ -n "$workload" ] || continue
+    [[ $workload =~ ^deploy-[a-z0-9_-]+$ ]] || refuse "invalid recorded workload $workload"
+    if ! running=$(docker container inspect -f '{{.State.Running}}' "$workload" 2>/dev/null); then
+      printf 'workload %s is missing\n' "$workload" >&2
+    elif [ "$running" != true ] && ! docker start "$workload" >/dev/null; then
+      printf 'workload %s did not start\n' "$workload" >&2
+    fi
+  done <"$list"
+}
+
+verb_workloads() {
+  # the input is checked before root, so a test can exercise it unprivileged
+  read_desired
+  validate workloads
+  require_root
+  require_platform
+  lock
+  local name list=''
+  name=$(interface_name)
+  require_owner "$name"
+  [ "${#workloads[@]}" -eq 0 ] || list=$(printf '%s\n' "${workloads[@]}")
+  if printf '%s' "${list:+$list$'\n'}" | same "$state_root/$name/workloads"; then
+    echo unchanged
+    return
+  fi
+  printf '%s' "${list:+$list$'\n'}" | write_file "$state_root/$name/workloads" 0600
+  echo 'changed workloads'
+}
+
 verb_observe() {
   require_root
   require_platform
@@ -679,9 +730,10 @@ verb_restore() {
     waited=$((waited + 1))
   done
   ensure_jumps "$name"
+  start_workloads "$name"
 }
 
-usage='usage: deploy-network version|check|observe|enroll|apply|remove'
+usage='usage: deploy-network version|check|observe|enroll|apply|remove|workloads'
 case ${1:-}:$# in
 version:1) verb_version ;;
 check:1) verb_check ;;
@@ -689,6 +741,7 @@ observe:1) verb_observe ;;
 enroll:1) verb_enroll ;;
 apply:1) verb_apply ;;
 remove:1) verb_remove ;;
+workloads:1) verb_workloads ;;
 restore:2) verb_restore "$2" ;;
 *) refuse "$usage" ;;
 esac

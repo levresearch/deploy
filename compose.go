@@ -141,7 +141,11 @@ func renderProject(
 	declaredVolumes := map[string]any{}
 
 	for _, name := range slices.Sorted(maps.Keys(services)) {
-		service, err := renderService(resolved, layout, name, services[name], commit, services, declaredVolumes)
+		placed, err := topologyService(resolved, name, services[name])
+		if err != nil {
+			return nil, err
+		}
+		service, err := renderService(resolved, layout, name, placed, commit, services, declaredVolumes)
 		if err != nil {
 			return nil, err
 		}
