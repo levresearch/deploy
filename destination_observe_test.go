@@ -62,7 +62,7 @@ func TestObservedAliasesChangeTransportAndCatchConflicts(t *testing.T) {
 	if plan.Network.Mode != "docker-only" || plan.Connections[0].Host != "db" {
 		t.Fatal("verified aliases still required WireGuard")
 	}
-	if plan.Destinations[0].CanonicalPath != "/srv/projects/app" || plan.ExecutionAvailable {
+	if plan.Destinations[0].CanonicalPath != "/srv/projects/app" || !plan.ExecutionAvailable {
 		t.Fatal(plan)
 	}
 	api := project.Services["api"]
