@@ -168,6 +168,22 @@ func openProject(options DeployOptions) (ResolvedProject, Layout, Runner, func()
 }
 
 func RunStatus(options DeployOptions) (int, error) {
+	if repositoryPath, isService := isServiceConfig(options); isService {
+		_, opened, closeAll, err := openServiceDestinations(repositoryPath, options)
+		if err != nil {
+			return exitPreconditionNotMet, err
+		}
+		defer closeAll()
+		for index, each := range opened {
+			if index > 0 {
+				fmt.Println()
+			}
+			if code, err := runServiceStatus(each.runner, each.view, each.layout, each.destination); err != nil {
+				return code, fmt.Errorf("destination %s: %w", each.name, err)
+			}
+		}
+		return exitOK, nil
+	}
 	resolved, layout, runner, closeRunner, destination, err := openProject(options)
 	if err != nil {
 		return exitPreconditionNotMet, err
@@ -249,7 +265,7 @@ func printServiceStatuses(runner Runner, projectName string, services map[string
 }
 
 func RunLogs(options DeployOptions, serviceName string, follow bool) (int, error) {
-	resolved, layout, runner, closeRunner, _, err := openProject(options)
+	resolved, layout, runner, closeRunner, err := openFor(options, serviceName)
 	if err != nil {
 		return exitPreconditionNotMet, err
 	}
@@ -294,8 +310,19 @@ func RunExec(options DeployOptions, serviceName string, command []string) (int, 
 	return runInsideContainer(options, serviceName, command)
 }
 
-func runInsideContainer(options DeployOptions, serviceName string, command []string) (int, error) {
+// openFor opens the destination a service runs on, which for version 1 is the
+// project's one destination.
+func openFor(options DeployOptions, serviceName string) (ResolvedProject, Layout, Runner, func(), error) {
+	if repositoryPath, isService := isServiceConfig(options); isService {
+		return openServiceFor(repositoryPath, options, serviceName)
+	}
 	resolved, layout, runner, closeRunner, _, err := openProject(options)
+
+	return resolved, layout, runner, closeRunner, err
+}
+
+func runInsideContainer(options DeployOptions, serviceName string, command []string) (int, error) {
+	resolved, layout, runner, closeRunner, err := openFor(options, serviceName)
 	if err != nil {
 		return exitPreconditionNotMet, err
 	}
@@ -331,12 +358,36 @@ func runInsideContainer(options DeployOptions, serviceName string, command []str
 // every other one starts from a config in a repository. Deploy ids are opaque
 // hex, so without this a busy destination is a directory of hashes.
 func RunList(options DeployOptions) (int, error) {
+	if repositoryPath, isService := isServiceConfig(options); isService {
+		resolved, opened, closeAll, err := openServiceDestinations(repositoryPath, options)
+		if err != nil {
+			return exitPreconditionNotMet, err
+		}
+		defer closeAll()
+		for index, each := range opened {
+			if index > 0 {
+				fmt.Println()
+			}
+			if len(opened) > 1 {
+				fmt.Printf("destination %s\n", each.name)
+			}
+			if code, err := listDestination(resolved, each.runner, each.destination); err != nil {
+				return code, err
+			}
+		}
+		return exitOK, nil
+	}
 	resolved, _, runner, closeRunner, destination, err := openProject(options)
 	if err != nil {
 		return exitPreconditionNotMet, err
 	}
 	defer closeRunner()
 
+	return listDestination(resolved, runner, destination)
+}
+
+// listDestination is deploy list for one destination.
+func listDestination(resolved ResolvedProject, runner Runner, destination Destination) (int, error) {
 	projectIDs, err := runner.ListDirectory(destination.Path)
 	if err != nil {
 		return exitPreconditionNotMet, err

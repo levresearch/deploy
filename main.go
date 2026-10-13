@@ -77,8 +77,15 @@ func runDeploy(args []string) int {
 	flags.BoolVar(&options.Affected, "affected", false, "only rebuild services the changes since the last deploy reached")
 	var buildOnDestination bool
 	flags.BoolVar(&buildOnDestination, "build-on-destination", false, "let the destination build instead of building here")
+	services := ""
+	flags.StringVar(&services, "service", "", "version 2: deploy only these services and release tasks, comma separated")
 	if keepGoing, exitCode := parseCommandFlags(flags, args); !keepGoing {
 		return exitCode
+	}
+	for _, service := range strings.Split(services, ",") {
+		if service = strings.TrimSpace(service); service != "" {
+			options.Services = append(options.Services, service)
+		}
 	}
 
 	// only an explicitly given flag overrides the config, so that leaving it off
@@ -344,7 +351,8 @@ func printUsage() {
 	fmt.Fprint(os.Stdout, `deploy - dynamically deploy managed services on servers you own
 
 usage:
-  deploy [flags]          deploy the current commit
+  deploy [flags]          deploy the current commit; version 2 takes
+                          --service a,b to deploy only those
   deploy check [flags]    validate the config, print it, change nothing
   deploy plan [flags]     preview version 2 topology offline; no host changes
   deploy migrate [flags]  print a version 1 to 2 conversion; never writes it

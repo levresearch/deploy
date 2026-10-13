@@ -147,10 +147,18 @@ func RunServiceDeploy(options DeployOptions, repositoryPath string) (exitCode in
 	if options.ForceUnlock {
 		return exitPreconditionNotMet, errors.New("--force-unlock is for legacy version 1 lock metadata and does not apply to version 2")
 	}
+	selected, err := selectNodes(resolved, options.Services)
+	if err != nil {
+		return exitPreconditionNotMet, err
+	}
 
 	var notifier *Notifier
 	var announced bool
 	_, stateless := SplitServices(resolved.Services)
+	if selected != nil {
+		stateless = maps.Clone(stateless)
+		maps.DeleteFunc(stateless, func(name string, _ Service) bool { return !selected[name] })
+	}
 	affected := AffectedNames(stateless)
 	var versions StageVersions
 	defer func() {
@@ -219,6 +227,10 @@ func RunServiceDeploy(options DeployOptions, repositoryPath string) (exitCode in
 			set.Release()
 			return exitPreconditionNotMet, fmt.Errorf("destination %s: %w", run.name, err)
 		}
+	}
+	if err := selectionIsReady(resolved, selected, runs); err != nil {
+		set.Release()
+		return exitPreconditionNotMet, err
 	}
 	operation, err := set.Begin("deploy", commit)
 	if err != nil {
@@ -345,7 +357,7 @@ func RunServiceDeploy(options DeployOptions, repositoryPath string) (exitCode in
 		}
 	}
 
-	if err := runWaves(resolved, runs, executors); err != nil {
+	if err := runWaves(resolved, runs, executors, selected); err != nil {
 		discardAll()
 		if writeErr := recordAll(); writeErr != nil {
 			return exitLiveButNeedsAHuman, fmt.Errorf("%w; recording what is live also failed: %v", err, writeErr)
@@ -408,7 +420,7 @@ func RunServiceDeploy(options DeployOptions, repositoryPath string) (exitCode in
 // runWaves runs release tasks and starts candidates wave by wave across every
 // destination, so whatever a service waits on is ready first, wherever it
 // runs. Candidates of one wave start together on all destinations.
-func runWaves(resolved ResolvedProject, runs []*destinationRun, executors map[string]*serviceExecutor) error {
+func runWaves(resolved ResolvedProject, runs []*destinationRun, executors map[string]*serviceExecutor, selected map[string]bool) error {
 	waves, err := readinessWaves(resolved)
 	if err != nil {
 		return err
@@ -420,6 +432,9 @@ func runWaves(resolved ResolvedProject, runs []*destinationRun, executors map[st
 	}
 
 	for _, wave := range waves {
+		if selected != nil {
+			wave = slices.DeleteFunc(slices.Clone(wave), func(name string) bool { return !selected[name] })
+		}
 		for _, run := range runs {
 			for _, name := range wave {
 				if _, task := run.view.Release[name]; task {
@@ -455,6 +470,57 @@ func runWaves(resolved ResolvedProject, runs []*destinationRun, executors map[st
 	}
 
 	return nil
+}
+
+// selectNodes checks the names given to --service. nil means everything.
+func selectNodes(resolved ResolvedProject, names []string) (map[string]bool, error) {
+	if len(names) == 0 {
+		return nil, nil
+	}
+	selected := map[string]bool{}
+	nodes := topologyNodes(resolved)
+	for _, name := range names {
+		if _, found := nodes[name]; !found {
+			return nil, fmt.Errorf("--service names %q, which %s does not have; it has %s", name, resolved.Environment, strings.Join(slices.Sorted(maps.Keys(nodes)), ", "))
+		}
+		selected[name] = true
+	}
+
+	return selected, nil
+}
+
+// selectionIsReady refuses a selected deploy whose services wait on something
+// that is neither part of it nor already there. Stateful services are always
+// brought up with their shared stack, so they count as there.
+func selectionIsReady(resolved ResolvedProject, selected map[string]bool, runs []*destinationRun) error {
+	if selected == nil {
+		return nil
+	}
+	recorded := map[string]bool{}
+	for _, run := range runs {
+		for name, record := range run.state.Services {
+			if record.Current != nil {
+				recorded[name] = true
+			}
+		}
+		for name, tasks := range run.state.Tasks {
+			if tasks[len(tasks)-1].Outcome == outcomeCompleted {
+				recorded[name] = true
+			}
+		}
+	}
+	nodes := topologyNodes(resolved)
+	var problems []error
+	for _, name := range slices.Sorted(maps.Keys(selected)) {
+		for _, dependency := range slices.Sorted(maps.Keys(nodes[name].DependsOn)) {
+			if selected[dependency] || nodes[dependency].IsStateful() || recorded[dependency] {
+				continue
+			}
+			problems = append(problems, fmt.Errorf("%s waits on %s, which has never been deployed; add it to --service", name, dependency))
+		}
+	}
+
+	return errors.Join(problems...)
 }
 
 // checkCrossHostPaths reaches each provider on another host the way its
@@ -797,6 +863,15 @@ func (executor *serviceExecutor) recordCutOver(state ServiceState) ServiceState 
 		record.Current = &release
 		record.Outcome = outcomeLive
 		record.Releases = append([]string{release.Commit}, slices.DeleteFunc(slices.Clone(record.Releases), func(existing string) bool { return existing == release.Commit })...)
+		if paths := releasePaths(executor.resolved, name); len(paths) > 0 {
+			record.Paths = maps.Clone(record.Paths)
+			if record.Paths == nil {
+				record.Paths = map[string][]string{}
+			}
+			record.Paths[release.Commit] = paths
+		} else {
+			delete(record.Paths, release.Commit)
+		}
 		state.Services[name] = record
 	}
 
@@ -830,6 +905,14 @@ func pruneServiceReleases(runner Runner, layout Layout, id string, state Service
 			}
 		}
 		record.Releases = kept
+		for commit := range record.Paths {
+			if !slices.Contains(kept, commit) && (record.Current == nil || record.Current.Commit != commit) && (record.Previous == nil || record.Previous.Commit != commit) {
+				delete(record.Paths, commit)
+			}
+		}
+		if len(record.Paths) == 0 {
+			record.Paths = nil
+		}
 		state.Services[name] = record
 		for _, commit := range kept {
 			referenced[commit] = true

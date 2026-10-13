@@ -200,7 +200,7 @@ func ResolveOperation(runner Runner, layout Layout, id string) error {
 		return err
 	}
 	if !found {
-		return fmt.Errorf("nothing to resolve on %s", runner.Describe())
+		return fmt.Errorf("%w on %s", errNothingToResolve, runner.Describe())
 	}
 	if existing.ID != id {
 		return fmt.Errorf("the unfinished operation on %s is %s, not %s", runner.Describe(), existing.ID, id)
@@ -238,7 +238,12 @@ func settleTasks(runner Runner, layout Layout, id string) error {
 	return err
 }
 
+var errNothingToResolve = errors.New("nothing to resolve")
+
 func RunResolve(options DeployOptions, id string) (int, error) {
+	if repositoryPath, isService := isServiceConfig(options); isService {
+		return runServiceResolve(repositoryPath, options, id)
+	}
 	startPath := options.Context
 	if startPath == "" {
 		working, err := os.Getwd()
@@ -253,22 +258,14 @@ func RunResolve(options DeployOptions, id string) (int, error) {
 		return exitPreconditionNotMet, err
 	}
 
-	var resolved ResolvedProject
 	var destination Destination
-	if version, versionErr := configVersion(repositoryPath); versionErr == nil && version == 2 {
-		if options.Destination != "" {
-			return exitPreconditionNotMet, errors.New("version 2 takes its destination from the config")
+	resolved, err := loadResolvedConfig(repositoryPath, options.Environment)
+	if err == nil {
+		destinationText := options.Destination
+		if destinationText == "" {
+			destinationText = resolved.Destination
 		}
-		resolved, _, destination, err = loadServiceConfig(repositoryPath, options.Environment)
-	} else {
-		resolved, err = loadResolvedConfig(repositoryPath, options.Environment)
-		if err == nil {
-			destinationText := options.Destination
-			if destinationText == "" {
-				destinationText = resolved.Destination
-			}
-			destination, err = ParseDestination(destinationText)
-		}
+		destination, err = ParseDestination(destinationText)
 	}
 	if err != nil {
 		return exitPreconditionNotMet, err
@@ -289,6 +286,39 @@ func RunResolve(options DeployOptions, id string) (int, error) {
 		return exitPreconditionNotMet, err
 	}
 	fmt.Printf("resolved operation %s on %s\n", id, destination)
+
+	return exitOK, nil
+}
+
+// runServiceResolve clears the operation on every destination that recorded
+// it. One operation spans every destination it locked, so it is resolved on
+// all of them at once.
+func runServiceResolve(repositoryPath string, options DeployOptions, id string) (int, error) {
+	_, opened, closeAll, err := openServiceDestinations(repositoryPath, options)
+	if err != nil {
+		return exitPreconditionNotMet, err
+	}
+	defer closeAll()
+
+	var cleared []string
+	var problems []error
+	for _, each := range opened {
+		err := ResolveOperation(each.runner, each.layout, id)
+		switch {
+		case errors.Is(err, errNothingToResolve):
+		case err != nil:
+			problems = append(problems, fmt.Errorf("destination %s: %w", each.name, err))
+		default:
+			cleared = append(cleared, each.name)
+			fmt.Printf("resolved operation %s on %s\n", id, each.destination)
+		}
+	}
+	if len(problems) > 0 {
+		return exitPreconditionNotMet, errors.Join(problems...)
+	}
+	if len(cleared) == 0 {
+		return exitPreconditionNotMet, fmt.Errorf("operation %s is not recorded on any destination", id)
+	}
 
 	return exitOK, nil
 }

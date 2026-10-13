@@ -8,6 +8,7 @@ import (
 	"path"
 	"slices"
 	"strconv"
+	"strings"
 )
 
 // ServiceReleaseProject names one service's release. Underscores separate the
@@ -234,4 +235,47 @@ func connectionEnvironment(resolved ResolvedProject, name string, service Servic
 	}
 
 	return json.Marshal(list)
+}
+
+// releasePaths is what a service's release needs from the managed network:
+// each provider it reaches on another host and each port it publishes for one.
+func releasePaths(resolved ResolvedProject, name string) []string {
+	whole := resolved.topology()
+	service, found := whole.Services[name]
+	if !found {
+		return nil
+	}
+	var paths []string
+	for _, port := range crossHostPorts(whole, name, service) {
+		address, rest, _ := strings.Cut(port, ":")
+		hostPort, _, _ := strings.Cut(rest, ":")
+		paths = append(paths, "publish "+address+":"+hostPort)
+	}
+	for _, connection := range service.Connections {
+		provider := whole.Services[connection.Service]
+		if whole.Network == nil || whole.destinationHost(provider.Destination) == whole.destinationHost(service.Destination) {
+			continue
+		}
+		path := fmt.Sprintf("connect %s:%d", whole.Network.Peers[provider.Destination].Address, provider.Endpoints[connection.Endpoint].HostPort)
+		if !slices.Contains(paths, path) {
+			paths = append(paths, path)
+		}
+	}
+	slices.Sort(paths)
+
+	return paths
+}
+
+// revokedPaths lists what a retained release needed from the managed network
+// that the current config no longer provides.
+func revokedPaths(resolved ResolvedProject, name string, needed []string) []string {
+	provided := releasePaths(resolved, name)
+	var revoked []string
+	for _, path := range needed {
+		if !slices.Contains(provided, path) {
+			revoked = append(revoked, path)
+		}
+	}
+
+	return revoked
 }
