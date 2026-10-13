@@ -153,9 +153,47 @@ await until('guest b rebooted', () => ssh('b', 'cat /proc/sys/kernel/random/boot
 await until('api after reboot', () => { try { return viaApi('redis-cli -h $CACHE_HOST -p $CACHE_PORT ping') === 'PONG'; } catch { return false; } }, 120000);
 pass('after the consumer host reboots, the network unit starts the live release and it reaches its provider again');
 
+const cacheMove = structuredClone(config);
+cacheMove.services.cache.destination = 'b';
+delete cacheMove.services.api.connections;
+writeFileSync(`${lab}/app/.deploy.json`, JSON.stringify(cacheMove, null, 1));
+git('commit', '-q', '-am', 'move the cache');
+result = deploy();
+assert.notEqual(result.status, 0);
+assert.match(result.stderr, /stateful cache moves from a to b, but its data stays on a/);
+assert.equal(ssh('a', `docker inspect -f '{{.Id}}' deploy-${runtime}-shared-cache-1`), cacheBefore);
+git('revert', '--no-edit', 'HEAD');
+pass('moving a stateful service to another host is refused before anything changes');
+
+config.services.api.destination = 'a';
+const moved = commit('move the api next to the cache');
+assert.match(succeed(deploy('env', 'push', '/lab/api.env')), /on vm-a/);
+result = deploy();
+assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+assert.match(result.stdout, /retired api from b; it now runs on a/);
+assert.equal(state('a').services.api.current.commit, moved);
+assert.equal(state('b').services.api, undefined);
+assert.equal(ssh('b', `docker ps -q --filter label=com.docker.compose.service=api | wc -l`), '0');
+assert.equal(ssh('a', `docker exec $(docker ps -q --filter label=com.docker.compose.service=api) sh -c 'redis-cli -h $CACHE_HOST -p $CACHE_PORT ping'`), 'PONG');
+assert.equal(ssh('a', `docker exec $(docker ps -q --filter label=com.docker.compose.service=api) printenv CACHE_HOST`), 'cache');
+pass('a stateless service moved to the provider\'s host runs there over Docker networking and is retired from the host it left');
+
+result = inContainer(['/lab/bin/deploy', 'destroy', '-D', 'b', '-C', '/lab/app'], 'app\n');
+assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+assert.match(result.stdout, new RegExp(`removing   managed network ${iface} on vm-b`));
+assert.deepEqual(state('b').services, {});
+assert.equal(ssh('b', `cat ${root}/env/api.env`), 'GREETING=from the env file');
+assert.equal(ssh('b', `ip link show ${iface} >/dev/null 2>&1 && echo up || echo gone`), 'gone');
+assert.equal(ssh('a', `docker exec $(docker ps -q --filter label=com.docker.compose.service=api) sh -c 'redis-cli -h $CACHE_HOST -p $CACHE_PORT ping'`), 'PONG');
+pass('destroy -D b removes that destination and its network, which nothing links any more, and leaves a serving');
+
+result = inContainer(['/lab/bin/deploy', 'destroy', '--volumes', '-C', '/lab/app'], 'app\n');
+assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+assert.match(result.stdout, new RegExp(`removed managed network ${iface} on vm-a`));
 for (const host of ['a', 'b']) {
-  ssh(host, `docker ps -aq --filter label=com.docker.compose.project | xargs -r docker inspect -f '{{.Name}} {{.Id}}' | awk '$1 ~ /^\\/deploy-${runtime}/ {print $2}' | xargs -r docker rm -f >/dev/null; docker network rm deploy-${runtime}-net >/dev/null 2>&1 || true`);
-  succeed(asDeployer(host, `sudo -n ${helperPath} remove`, `runtime ${runtime}\nenvironment production\n`));
-  ssh(host, 'rm -rf /home/deployer/Projects/app');
+  assert.equal(ssh(host, `docker ps -aq --filter label=com.docker.compose.project | xargs -r docker inspect -f '{{.Name}}' | grep -c '^/deploy-${runtime}' || true`), '0');
+  assert.equal(ssh(host, `ip link show ${iface} >/dev/null 2>&1 && echo up || echo gone; test -e /var/lib/deploy-network/${iface} && echo owned || echo free; test -e ${root} && echo kept || echo removed`), 'gone\nfree\nremoved');
 }
-pass('deploy fixture removed');
+pass('destroy --volumes removes every destination and the managed network, leaving nothing of the project');
+ssh('a', 'rm -rf /home/deployer/Projects/app');
+ssh('b', 'rm -rf /home/deployer/Projects/app');

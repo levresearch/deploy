@@ -462,6 +462,8 @@ func TestDestroyRemovesOneEnvironmentsServicesAndNothingElse(t *testing.T) {
 		t.Fatalf("starting a leftover: %v %s", err, output)
 	}
 
+	// a pushed secret stays behind a destroy that keeps the data
+	writeFile(t, NewLayout(destination, id).EnvDirectory(), "kept.env", "KEPT=1\n")
 	if code, err := RunDestroy(production, false, strings.NewReader("ending\n")); code != exitOK || err != nil {
 		t.Fatalf("destroy: %d %v", code, err)
 	}
@@ -481,10 +483,15 @@ func TestDestroyRemovesOneEnvironmentsServicesAndNothingElse(t *testing.T) {
 		t.Fatalf("destroy without --volumes removed the data: %s", output)
 	}
 	layout := NewLayout(destination, id)
-	for _, gone := range []string{layout.ServiceStateFile(), layout.StateFile(), layout.Releases()} {
+	for _, gone := range []string{layout.StateFile(), layout.Releases()} {
 		if _, err := os.Stat(gone); !os.IsNotExist(err) {
 			t.Fatalf("%s survived destroy", gone)
 		}
+	}
+	// the kept data stays owned, so env files left beside it never make the
+	// root look like nobody's
+	if kept := recordedState(t, destination, id); len(kept.Services) != 0 || kept.Environment != "production" || kept.Destination != "main" {
+		t.Fatalf("destroy without --volumes should keep only an ownership record: %+v", kept)
 	}
 	if _, err := os.Stat(operationFile(layout)); !os.IsNotExist(err) {
 		t.Fatal("destroy left its operation recorded")
