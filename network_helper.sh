@@ -227,6 +227,7 @@ render_unit() {
 [Unit]
 Description=deploy managed network firewall for $1
 Requires=docker.service
+Wants=wg-quick@$1.service
 After=docker.service wg-quick@$1.service
 PartOf=docker.service
 
@@ -453,6 +454,12 @@ verb_apply() {
     ip -4 route del "$route" dev "$name"
     changed "route $route removed"
   done < <(ip -4 -o route show dev "$name" | grep -v ' proto kernel ' || true)
+  # restore puts these back at boot, since wg-quick with Table=off does not
+  local -a recorded=()
+  read -ra recorded <<<"$wanted"
+  if ! { [ "${#recorded[@]}" -eq 0 ] || printf '%s\n' "${recorded[@]}"; } | same "$state/routes"; then
+    { [ "${#recorded[@]}" -eq 0 ] || printf '%s\n' "${recorded[@]}"; } | write_file "$state/routes" 0600
+  fi
 
   if ! render_rules "$name" | same "$state/firewall.rules" || ! live_rules "$name" | same "$state/firewall.live"; then
     render_rules "$name" | write_file "$state/firewall.rules" 0600
@@ -565,6 +572,20 @@ verb_restore() {
   [ -f "$state_root/$name/owner.json" ] && [ -f "$state_root/$name/firewall.rules" ] || refuse "$name has no recorded firewall"
   lock
   iptables-restore -w --noflush <"$state_root/$name/firewall.rules"
+  local route waited=0
+  if [ -f "$state_root/$name/routes" ] && ip link show "$name" >/dev/null 2>&1; then
+    while read -r route; do
+      [ -n "$route" ] || continue
+      [[ $route =~ ^(.+)/32$ ]] && [[ ${BASH_REMATCH[1]} =~ $ipv4_pattern ]] || refuse "invalid recorded route $route"
+      ip -4 route replace "$route" dev "$name"
+    done <"$state_root/$name/routes"
+  fi
+  # at boot Docker may still be creating its chains when this runs
+  until iptables -w -n -L DOCKER-USER >/dev/null 2>&1; do
+    [ "$waited" -lt 90 ] || refuse 'DOCKER-USER did not appear within 90 seconds; is Docker running?'
+    sleep 1
+    waited=$((waited + 1))
+  done
   ensure_jumps "$name"
 }
 
