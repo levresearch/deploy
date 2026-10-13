@@ -50,18 +50,35 @@ func callNetworkHelper(ctx context.Context, destination Destination, verb, input
 	if err == nil {
 		return output.String(), nil
 	}
-	reason := strings.TrimSpace(failure.String())
+	return "", helperFailure(destination.Host, verb, strings.TrimSpace(failure.String()))
+}
+
+// helperFailure turns the helper's stderr into one error: a refusal, a helper
+// that is missing or not allowed, or the first line of what failed together
+// with the helper's own account of whether it put the host back.
+func helperFailure(host, verb, reason string) error {
+	outcome := ""
 	for _, line := range strings.Split(reason, "\n") {
 		if refused, found := strings.CutPrefix(line, "refused: "); found {
-			return "", fmt.Errorf("%s refused %s: %s", destination.Host, verb, refused)
+			return fmt.Errorf("%s refused %s: %s", host, verb, refused)
+		}
+		if failed, found := strings.CutPrefix(line, "failed: "); found {
+			outcome = failed
 		}
 	}
 	for _, missing := range []string{"password is required", "a terminal is required", "not allowed", "command not found", "No such file"} {
 		if strings.Contains(reason, missing) {
-			return "", fmt.Errorf("%s: %w", destination.Host, errNetworkHelperMissing)
+			return fmt.Errorf("%s: %w", host, errNetworkHelperMissing)
 		}
 	}
-	return "", fmt.Errorf("network helper %s failed on %s: %s", verb, destination.Host, firstLine([]byte(reason)))
+	cause := firstLine([]byte(reason))
+	if outcome != "" && !strings.HasPrefix(cause, "failed: ") {
+		return fmt.Errorf("network helper %s failed on %s: %s; %s", verb, host, cause, outcome)
+	}
+	if outcome != "" {
+		return fmt.Errorf("network helper %s failed on %s: %s", verb, host, outcome)
+	}
+	return fmt.Errorf("network helper %s failed on %s: %s", verb, host, cause)
 }
 
 // HostObservation is the helper's non-secret report on one host.

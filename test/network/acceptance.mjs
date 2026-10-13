@@ -4,8 +4,9 @@ import { ssh, assert, until, pass, inContainer, asDeployer, succeed } from './co
 
 // acceptance for the managed network, after helper.mjs and reconcile.mjs:
 // production and staging side by side, a conflicting project, reboot, UFW and
-// Docker restarts, route loss, an unsupported host, a rebuilt peer and logs
-// that never carry a private key.
+// Docker restarts, route loss, an unsupported host, a missing DOCKER-USER chain,
+// a rebuilt peer, an apply that fails halfway and logs that never carry a
+// private key.
 const lab = process.env.DEPLOY_NETWORK_LAB;
 const image = 'redis@sha256:858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499';
 const helperPath = '/usr/local/libexec/deploy-network';
@@ -114,6 +115,16 @@ assert.match(unsupported.stderr, /only Debian and Ubuntu hosts are supported/);
 assert.equal(unchanged('production'), true);
 pass('an unsupported host is refused with the reason before anything changes');
 
+// as on a host where Docker manages nftables directly and never makes the chain
+ssh('b', 'iptables -F DOCKER-USER; while iptables -D FORWARD -j DOCKER-USER 2>/dev/null; do :; done; iptables -X DOCKER-USER');
+const noDockerChain = network('plan', '-e', 'production');
+ssh('b', 'systemctl restart docker');
+assert.notEqual(noDockerChain.status, 0);
+assert.match(noDockerChain.stderr, /DOCKER-USER is missing/);
+await untilUnchanged('plans after docker comes back', ['production', 'staging'], 90000);
+assert.equal(reach('10.78.0.1'), 'open');
+pass('a host without the DOCKER-USER chain is refused, and the boot unit restores the jumps once Docker makes it again');
+
 const oldKey = succeed(network('status', '-e', 'production')).match(/^b \(vm-b\)[\s\S]*?publicKey +(\S+)$/m)[1];
 succeed(asDeployer('b', `sudo -n ${helperPath} remove`, 'runtime fb00000a\nenvironment production\n'));
 const rebuilt = plan('production');
@@ -127,6 +138,36 @@ assert.equal(peers.split('\n').length, 1);
 await until('production after re-enrollment', () => reach('10.78.0.1') === 'open', 60000);
 assert.equal(unchanged('production'), true);
 pass('a rebuilt peer enrolls with a new key, and its old key is revoked on the other host');
+
+const productionRoot = '/home/deployer/Projects/lab/fb00000a';
+const productionState = `/var/lib/deploy-network/${production}`;
+const generation = host => JSON.parse(ssh(host, `cat ${productionRoot}/network.json`)).generation;
+const hostState = host => ssh(host, `sha256sum < /etc/wireguard/${production}.conf; cat ${productionState}/owner.json ${productionState}/applied; iptables -S DEPLOY-${production.slice(2).toUpperCase()}-OUT; ip -4 -o addr show dev ${production} | awk '{print $4}'`);
+// hosts apply in the order of their machine identities, which each lab boot draws anew
+const [first, second] = [...plan('production').matchAll(/^  ([ab]) \(vm-[ab]\)/gm)].map(match => match[1]);
+const before = { first: generation(first), second: generation(second), state: hostState(second) };
+project.network.peers.b.address = '10.78.0.3';
+writeFileSync(config, JSON.stringify(project));
+ssh(second, `chattr +i ${productionState}/applied`);
+let halfway;
+try {
+  halfway = network('apply', '-e', 'production');
+} finally {
+  ssh(second, `chattr -i ${productionState}/applied`);
+}
+assert.notEqual(halfway.status, 0);
+assert.match(halfway.stderr, new RegExp(`failed on vm-${second}: .*is back to its previous state; hosts before it were applied, apply again`));
+assert.equal(generation(first), before.first + 1);
+assert.equal(generation(second), before.second);
+assert.equal(hostState(second), before.state);
+assert.equal(ssh(second, `{ ls -A ${productionState} | grep '^\\.deploy-network' || true; ls -A /run/deploy-network-prior; } | wc -l`), '0');
+assert.match(plan('production'), new RegExp(`^  ${second} \\(vm-${second}\\): desired network differs from the applied one`, 'm'));
+succeed(network('apply', '-e', 'production'));
+assert.equal(generation(second), before.second + 1);
+assert.match(ssh(second, `grep -c '10.78.0.2/' ${productionState}/previous/config`), /^[1-9]$/);
+await until('production from the moved peer', () => reach('10.78.0.1', '-s 10.78.0.3') === 'open', 60000);
+assert.equal(unchanged('production'), true);
+pass('an apply that fails on the second host puts that host back as it was, and the next apply converges');
 
 const secrets = ['a', 'b'].flatMap(host => [production, staging].map(name => ssh(host, `cat /etc/wireguard/${name}.key`)));
 for (const secret of secrets) {
