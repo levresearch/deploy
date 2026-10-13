@@ -365,7 +365,8 @@ func runServiceEnvPush(repositoryPath string, options DeployOptions, localPath s
 func envFileDestinations(resolved ResolvedProject, file string) []string {
 	var names []string
 	for _, node := range topologyNodes(resolved) {
-		if slices.Contains(node.Env, file) && !slices.Contains(names, node.Destination) {
+		listed := slices.Contains(node.Env, file) || (node.Host != nil && node.Host.TunnelEnv == file)
+		if listed && !slices.Contains(names, node.Destination) {
 			names = append(names, node.Destination)
 		}
 	}

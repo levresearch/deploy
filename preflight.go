@@ -238,6 +238,11 @@ func collectProjectEnvFiles(service Service, wanted map[string]bool) {
 			wanted[entry] = true
 		}
 	}
+	// a tunnel-only env file is needed for interpolation but is never mounted
+	// into the service, since it is not in Env
+	if service.Host != nil && service.Host.TunnelEnv != "" {
+		wanted[service.Host.TunnelEnv] = true
+	}
 }
 
 func missingPackages(host string, missing []string) error {

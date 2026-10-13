@@ -214,6 +214,7 @@ everything deploy knows about, and what you can put in it.
 | `domain` | `shop.example.com` | the hostname you set up on the tunnel. deploy checks this actually answers after it cuts over |
 | `port` | number | the container port cloudflared talks to |
 | `tunnelTokenFrom` | `"WEB_TUNNEL_TOKEN"` | the *name* of the env var holding your token, never the token itself. it gets read out of your env file on the server, so it never ends up in this file or in ps |
+| `tunnelEnv` | `"tunnel.env"` | optional. the env file the token is read from, pushed with `deploy env push`. only cloudflared's token comes out of it and it is never mounted into the service, so the service cannot read the token. without it, the token has to sit in one of the service's own `env` files, and the service sees it too |
 
 three rules deploy will hold you to: anything hosted needs a healthcheck, has to be `stateful: false`, and can't publish `ports`. two copies of the same service can't both bind 3000, which is the whole reason the cutover works.
 

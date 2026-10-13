@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -486,5 +487,104 @@ func TestAProjectOfOnlyStatefulServicesDeploys(t *testing.T) {
 	}
 	if state.Current != ShortCommit(commit) {
 		t.Errorf("current = %q, want %q", state.Current, ShortCommit(commit))
+	}
+}
+
+const tunnelEnvConfig = `{
+  "version": 1,
+  "id": "a3f19c02",
+  "name": "lectern",
+  "services": {
+    "web": {
+      "image": "nginx",
+      "stateful": false,
+      "env": [".env.production"],
+      "healthcheck": {"command": ["CMD", "true"]},
+      "host": {"domain": "lectern.example.com", "port": 3000, "tunnelTokenFrom": "WEB_TUNNEL_TOKEN", "tunnelEnv": ".env.tunnel"}
+    }
+  }
+}`
+
+// a tunnel-only env file feeds compose's interpolation of the token and is
+// never handed to the hosted service, so the service cannot read the token.
+func TestATunnelOnlyEnvFileNeverReachesTheService(t *testing.T) {
+	resolved := loadAndResolve(t, tunnelEnvConfig, defaultEnvironmentName)
+	directory := t.TempDir()
+	layout := NewLayout(directory, "a3f19c02")
+
+	arguments := EnvFileArguments(resolved, layout)
+	want := []string{
+		"--env-file", filepath.Join(layout.EnvDirectory(), ".env.production"),
+		"--env-file", filepath.Join(layout.EnvDirectory(), ".env.tunnel"),
+	}
+	if !slices.Equal(arguments, want) {
+		t.Fatalf("EnvFileArguments = %v, want %v", arguments, want)
+	}
+
+	release, err := RenderRelease(resolved, layout, "aaaaaaa")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(release), ".env.tunnel") {
+		t.Fatalf("the tunnel env file was handed to the service:\n%s", release)
+	}
+
+	dockerAvailable(t)
+	if err := os.MkdirAll(layout.EnvDirectory(), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, layout.EnvDirectory(), ".env.production", "GREETING=hello\n")
+	writeFile(t, layout.EnvDirectory(), ".env.tunnel", "WEB_TUNNEL_TOKEN=tunnel-only-token\n")
+	shared, err := RenderShared(resolved, layout, "aaaaaaa")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, rendered := range map[string][]byte{"shared": shared, "release": release} {
+		file := filepath.Join(directory, name+".yml")
+		if err := os.WriteFile(file, rendered, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		output, err := exec.Command("docker", append(append([]string{"compose", "--file", file}, arguments...), "config", "--format", "json")...).CombinedOutput()
+		if err != nil {
+			t.Fatalf("compose refused %s: %v\n%s", name, err, output)
+		}
+		var project struct {
+			Services map[string]struct {
+				Environment map[string]*string `json:"environment"`
+			} `json:"services"`
+		}
+		if err := json.Unmarshal(output, &project); err != nil {
+			t.Fatalf("%s: %v\n%s", name, err, output)
+		}
+		for service, settings := range project.Services {
+			if service == TunnelServiceName("web") {
+				if token := settings.Environment["TUNNEL_TOKEN"]; token == nil || *token != "tunnel-only-token" {
+					t.Errorf("cloudflared did not get the token from the tunnel env file")
+				}
+				continue
+			}
+			for variable, value := range settings.Environment {
+				if value != nil && *value == "tunnel-only-token" {
+					t.Errorf("%s can read the tunnel token through %s", service, variable)
+				}
+			}
+		}
+	}
+}
+
+func TestATunnelEnvMustBeABareFileTheServiceDoesNotList(t *testing.T) {
+	for _, bad := range []string{`"../secrets.env"`, `"env/tunnel"`, `".."`, `".env.production"`} {
+		raw := strings.Replace(tunnelEnvConfig, `"tunnelEnv": ".env.tunnel"`, `"tunnelEnv": `+bad, 1)
+		project, err := LoadProject(writeConfig(t, raw))
+		if err != nil {
+			continue
+		}
+		resolved, err := project.ResolveEnvironment(defaultEnvironmentName)
+		if err == nil {
+			err = resolved.Validate()
+		}
+		if err == nil || !strings.Contains(err.Error(), "tunnelEnv") {
+			t.Errorf("tunnelEnv %s was accepted: %v", bad, err)
+		}
 	}
 }
