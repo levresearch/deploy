@@ -69,6 +69,9 @@ type Host struct {
 	Domain          string `json:"domain"`
 	Port            int    `json:"port"`
 	TunnelTokenFrom string `json:"tunnelTokenFrom"`
+	// TunnelEnv names an env file that only cloudflared's token is read from,
+	// so the token never reaches the hosted service's own environment.
+	TunnelEnv string `json:"tunnelEnv,omitempty"`
 }
 
 type ResolvedProject struct {

@@ -160,3 +160,13 @@ func TestMovedServicesRetireButStatefulOnesNeverMove(t *testing.T) {
 		t.Fatalf("a stateful service was allowed to move: %v", err)
 	}
 }
+
+func TestATunnelEnvGoesWhereItsHostedServiceRuns(t *testing.T) {
+	resolved := topologyResolved(t)
+	api := resolved.Services["api"]
+	api.Host = &Host{Domain: "api.example.com", Port: 3000, TunnelTokenFrom: "API_TUNNEL_TOKEN", TunnelEnv: "tunnel.env"}
+	resolved.Services["api"] = api
+	if got := strings.Join(envFileDestinations(resolved, "tunnel.env"), ","); got != "app" {
+		t.Fatalf("tunnel.env goes to %q", got)
+	}
+}

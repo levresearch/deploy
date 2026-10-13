@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"regexp"
 	"slices"
 	"strings"
 )
@@ -111,6 +112,9 @@ func validateService(name string, service Service, resolved ResolvedProject) []e
 	return problems
 }
 
+// envFileNamePattern is a bare file name in the env directory.
+var envFileNamePattern = regexp.MustCompile(`^\.?[A-Za-z0-9_][A-Za-z0-9._-]*$`)
+
 func validateHost(name string, service Service) []error {
 	var problems []error
 
@@ -125,6 +129,20 @@ func validateHost(name string, service Service) []error {
 			"service %q has a host block with no tunnelTokenFrom, which names the env var holding the token rather than the token itself",
 			name,
 		))
+	}
+	if tunnelEnv := service.Host.TunnelEnv; tunnelEnv != "" {
+		if !envFileNamePattern.MatchString(tunnelEnv) {
+			problems = append(problems, fmt.Errorf(
+				"service %q has tunnelEnv %q, which must be a file name deploy places in the env directory, not a path",
+				name, tunnelEnv,
+			))
+		}
+		if slices.Contains(service.Env, tunnelEnv) {
+			problems = append(problems, fmt.Errorf(
+				"service %q lists its tunnelEnv %q in env too, which would hand the tunnel token to the service itself",
+				name, tunnelEnv,
+			))
+		}
 	}
 	if service.IsStateful() {
 		problems = append(problems, fmt.Errorf(
