@@ -23,15 +23,21 @@ type DestinationFacts struct {
 }
 
 // CheckLocalRequirements covers the machine deploy was invoked on. Docker is
-// here rather than only on the destination because builds happen locally.
-func CheckLocalRequirements(runner Runner, destination Destination) error {
+// here rather than only on the destination because builds happen locally; a
+// project that only runs published images builds nothing and needs none.
+func CheckLocalRequirements(runner Runner, destination Destination, builds bool) error {
 	required := []struct {
 		packageName string
 		probe       []string
 	}{
 		{"git", []string{"git", "--version"}},
 		{"tar", []string{"tar", "--version"}},
-		{"docker", []string{"docker", "--version"}},
+	}
+	if builds {
+		required = append(required, struct {
+			packageName string
+			probe       []string
+		}{"docker", []string{"docker", "--version"}})
 	}
 	if destination.IsRemote() {
 		required = append(required, struct {
@@ -50,6 +56,9 @@ func CheckLocalRequirements(runner Runner, destination Destination) error {
 		return missingPackages("this machine", missing)
 	}
 
+	if !builds {
+		return nil
+	}
 	if output, err := runner.Run([]string{"docker", "info"}); err != nil {
 		return fmt.Errorf(
 			"docker is installed on this machine but its daemon is not reachable, and builds happen here: %s",

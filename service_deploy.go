@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"maps"
 	"os"
 	"path"
@@ -33,59 +34,19 @@ func configVersion(repositoryPath string) (int, error) {
 	return version.Version, nil
 }
 
-// loadServiceConfig loads a version 2 config and refuses what one destination
-// cannot run yet.
+// loadServiceConfig loads a version 2 config for the commands that still work
+// on one destination.
 func loadServiceConfig(repositoryPath, environmentName string) (ResolvedProject, string, Destination, error) {
-	project, err := loadPlanningProject(path.Join(repositoryPath, configFileName))
+	resolved, destinations, err := loadTopology(repositoryPath, environmentName)
 	if err != nil {
 		return ResolvedProject{}, "", Destination{}, err
 	}
-	if project.Version != 2 {
-		return ResolvedProject{}, "", Destination{}, errors.New("this command needs a version 2 config")
+	if len(destinations) != 1 {
+		return ResolvedProject{}, "", Destination{}, errors.New("this command works on one destination for now; deploy itself handles several")
 	}
-	if environmentName == "" {
-		environmentName = defaultEnvironmentName
-	}
-	resolved, err := project.ResolveEnvironment(environmentName)
-	if err != nil {
-		return ResolvedProject{}, "", Destination{}, err
-	}
-	if err := resolved.Validate(); err != nil {
-		return ResolvedProject{}, "", Destination{}, fmt.Errorf("%s is not valid:\n  %s", configFileName, strings.ReplaceAll(err.Error(), "\n", "\n  "))
-	}
-	if len(resolved.Destinations) != 1 {
-		return ResolvedProject{}, "", Destination{}, errors.New("version 2 deploys one destination for now; deployment across several destinations arrives with managed networking")
-	}
+	name := slices.Collect(maps.Keys(destinations))[0]
 
-	var problems []error
-	for _, name := range ServiceNames(resolved.Services) {
-		service := resolved.Services[name]
-		for _, endpoint := range slices.Sorted(maps.Keys(service.Endpoints)) {
-			if service.Endpoints[endpoint].HostPort != 0 {
-				problems = append(problems, fmt.Errorf("%s endpoint %s publishes a host port, which needs managed networking that is not available yet", name, endpoint))
-			}
-		}
-		if !service.IsStateful() {
-			continue
-		}
-		// the shared stack is up before any release, so it cannot wait on one
-		for dependency := range service.DependsOn {
-			if dependsOn, found := resolved.Services[dependency]; !found || !dependsOn.IsStateful() {
-				problems = append(problems, fmt.Errorf("stateful %s cannot depend on %s, which starts after it", name, dependency))
-			}
-		}
-	}
-	if err := errors.Join(problems...); err != nil {
-		return ResolvedProject{}, "", Destination{}, err
-	}
-
-	name := slices.Collect(maps.Keys(resolved.Destinations))[0]
-	destination, err := topologyDestination(resolved.Destinations[name])
-	if err != nil {
-		return ResolvedProject{}, "", Destination{}, err
-	}
-
-	return resolved, name, destination, nil
+	return resolved, name, destinations[name], nil
 }
 
 // nodeDigest identifies one service's or task's configuration, so a recorded
@@ -176,12 +137,12 @@ func pendingTasks(state ServiceState) error {
 }
 
 func RunServiceDeploy(options DeployOptions, repositoryPath string) (exitCode int, err error) {
-	resolved, name, destination, err := loadServiceConfig(repositoryPath, options.Environment)
+	resolved, destinations, err := loadTopology(repositoryPath, options.Environment)
 	if err != nil {
 		return exitPreconditionNotMet, err
 	}
 	if options.Destination != "" {
-		return exitPreconditionNotMet, errors.New("version 2 takes its destination from the config; --destination applies to version 1")
+		return exitPreconditionNotMet, errors.New("version 2 takes its destinations from the config; --destination applies to version 1")
 	}
 	if options.ForceUnlock {
 		return exitPreconditionNotMet, errors.New("--force-unlock is for legacy version 1 lock metadata and does not apply to version 2")
@@ -219,24 +180,45 @@ func RunServiceDeploy(options DeployOptions, repositoryPath string) (exitCode in
 	if err != nil {
 		return exitPreconditionNotMet, err
 	}
-	if err := CheckLocalRequirements(LocalRunner{}, destination); err != nil {
-		return exitPreconditionNotMet, err
+	builds := false
+	for _, service := range buildableServices(resolved) {
+		builds = builds || len(service.Build) > 0
+	}
+	for _, name := range slices.Sorted(maps.Keys(destinations)) {
+		if err := CheckLocalRequirements(LocalRunner{}, destinations[name], builds); err != nil {
+			return exitPreconditionNotMet, err
+		}
 	}
 
-	set, layout, err := lockServiceDestination(resolved, name, destination)
+	ctx := context.Background()
+	observations, err := observeTopology(ctx, &resolved, destinations, observeDestination)
 	if err != nil {
 		return exitPreconditionNotMet, err
 	}
-	runner := set.Runner(0)
-	destination.Path = path.Dir(layout.Root)
-
-	state, err := destinationServiceState(runner, resolved, layout, name)
-	if err == nil {
-		err = pendingTasks(state)
-	}
+	hosts, err := networkHosts(resolved)
 	if err != nil {
-		set.Release()
 		return exitPreconditionNotMet, err
+	}
+	// a missing or outdated helper is found before anything is locked
+	if len(hosts) > 0 {
+		if _, err := inspectNetwork(ctx, resolved, hosts, callNetworkHelper); err != nil {
+			return exitPreconditionNotMet, err
+		}
+	}
+
+	set, runs, err := lockTopology(ctx, resolved, destinations, observations)
+	if err != nil {
+		return exitPreconditionNotMet, err
+	}
+	for _, run := range runs {
+		run.state, err = destinationServiceState(run.runner, resolved, run.layout, run.name)
+		if err == nil {
+			err = pendingTasks(run.state)
+		}
+		if err != nil {
+			set.Release()
+			return exitPreconditionNotMet, fmt.Errorf("destination %s: %w", run.name, err)
+		}
 	}
 	operation, err := set.Begin("deploy", commit)
 	if err != nil {
@@ -246,72 +228,134 @@ func RunServiceDeploy(options DeployOptions, repositoryPath string) (exitCode in
 	set.ReleaseOnSignal()
 	defer set.Finish(&exitCode)
 
-	// recorded before anything changes, so the root is owned per service from
-	// the first step and a version 1 deploy can no longer touch it
-	if err := runner.MkdirAll(layout.Root); err != nil {
-		return exitDeployFailed, err
-	}
-	if state, err = WriteServiceState(runner, layout, state); err != nil {
-		return exitDeployFailed, err
+	builders := map[string]*Builder{}
+	for _, run := range runs {
+		// recorded before anything changes, so the root is owned per service
+		// from the first step and a version 1 deploy can no longer touch it
+		if err := run.runner.MkdirAll(run.layout.Root); err != nil {
+			return exitDeployFailed, err
+		}
+		if run.state, err = WriteServiceState(run.runner, run.layout, run.state); err != nil {
+			return exitDeployFailed, err
+		}
+		facts, err := CheckDestination(run.runner, run.view, run.layout)
+		if err != nil {
+			return exitPreconditionNotMet, fmt.Errorf("destination %s: %w", run.name, err)
+		}
+		if !builds {
+			fmt.Printf("deploying %s/%s %s to %s (published images, nothing to build)\n", resolved.Name, resolved.Environment, ShortCommit(commit), run.destination)
+			continue
+		}
+		builder, err := NewBuilder(run.runner, facts, resolved.RuntimeID(), repositoryPath, run.destination.IsRemote(), resolveBuildOnDestination(options.BuildOnDest, resolved.BuildOnDestination))
+		if err != nil {
+			return exitPreconditionNotMet, fmt.Errorf("destination %s: %w", run.name, err)
+		}
+		builders[run.name] = builder
+		fmt.Printf("deploying %s/%s %s to %s (%s)\n", resolved.Name, resolved.Environment, ShortCommit(commit), run.destination, builder.Describe())
 	}
 
-	facts, err := CheckDestination(runner, resolved, layout)
-	if err != nil {
-		return exitPreconditionNotMet, err
-	}
-	builder, err := NewBuilder(runner, facts, resolved.RuntimeID(), repositoryPath, destination.IsRemote(), resolveBuildOnDestination(options.BuildOnDest, resolved.BuildOnDestination))
-	if err != nil {
-		return exitPreconditionNotMet, err
-	}
-	fmt.Printf("deploying %s/%s %s to %s (%s)\n", resolved.Name, resolved.Environment, ShortCommit(commit), destination, builder.Describe())
-
-	releaseDirectory := layout.Release(commit)
-	if err := PlaceRelease(runner, repositoryPath, gitStorage, destination, commit, releaseDirectory); err != nil {
-		return exitDeployFailed, err
-	}
-	fmt.Printf("  placed release in %s\n", releaseDirectory)
-	var reuse map[string]string
-	if options.Affected {
-		if reuse, err = planServiceReuse(builder, resolved, repositoryPath, state, commit); err != nil {
+	for _, run := range runs {
+		releaseDirectory := run.layout.Release(commit)
+		if err := PlaceRelease(run.runner, repositoryPath, gitStorage, run.destination, commit, releaseDirectory); err != nil {
+			return exitDeployFailed, fmt.Errorf("destination %s: %w", run.name, err)
+		}
+		fmt.Printf("  placed release in %s\n", releaseDirectory)
+		if !builds {
+			continue
+		}
+		var reuse map[string]string
+		if options.Affected {
+			if reuse, err = planServiceReuse(builders[run.name], run.view, repositoryPath, run.state, commit); err != nil {
+				return exitDeployFailed, err
+			}
+		}
+		builders[run.name].SetReleaseDirectory(releaseDirectory)
+		if err := buildServices(builders[run.name], run.view, repositoryPath, commit, reuse); err != nil {
 			return exitDeployFailed, err
 		}
 	}
-	builder.SetReleaseDirectory(releaseDirectory)
-	if err := buildServices(builder, resolved, repositoryPath, commit, reuse); err != nil {
-		return exitDeployFailed, err
+
+	// the private network exists before anything binds to it or calls across it
+	if len(hosts) > 0 {
+		fmt.Println("  managed network")
+		runners := map[string]Runner{}
+		for _, run := range runs {
+			runners[run.name] = run.runner
+		}
+		if err := applyNetwork(ctx, resolved, hosts, runners, observations, operation.ID, indented{os.Stdout}); err != nil {
+			return exitDeployFailed, fmt.Errorf("the managed network could not be applied, so nothing was started: %w", err)
+		}
 	}
 
-	if _, err := startShared(runner, layout, resolved, commit); err != nil {
-		return exitDeployFailed, err
-	}
-	stateful, _ := SplitServices(resolved.Services)
-	for _, service := range ServiceNames(stateful) {
-		record := state.Services[service]
-		digest := nodeDigest(stateful[service])
-		if record.Current == nil || record.Current.ConfigDigest != digest {
-			current := sharedRelease(resolved.RuntimeID(), commit, digest)
-			record.Current = &current
+	for _, run := range runs {
+		if _, err := startShared(run.runner, run.layout, run.view, commit); err != nil {
+			return exitDeployFailed, fmt.Errorf("destination %s: %w", run.name, err)
 		}
-		record.Stateful, record.Outcome, record.Previous, record.Releases = true, outcomeLive, nil, nil
-		state.Services[service] = record
+		stateful, _ := SplitServices(run.view.Services)
+		for _, service := range ServiceNames(stateful) {
+			record := run.state.Services[service]
+			digest := nodeDigest(stateful[service])
+			if record.Current == nil || record.Current.ConfigDigest != digest {
+				current := sharedRelease(resolved.RuntimeID(), commit, digest)
+				record.Current = &current
+			}
+			record.Stateful, record.Outcome, record.Previous, record.Releases = true, outcomeLive, nil, nil
+			run.state.Services[service] = record
+		}
 	}
 
 	if len(stateless) > 0 {
-		versions = StageVersions{Previous: liveCommits(state, stateless), Incoming: ShortCommit(commit)}
+		var previous []string
+		for _, run := range runs {
+			_, local := SplitServices(run.view.Services)
+			if commits := liveCommits(run.state, local); commits != "" && !slices.Contains(previous, commits) {
+				previous = append(previous, commits)
+			}
+		}
+		versions = StageVersions{Previous: strings.Join(previous, ", "), Incoming: ShortCommit(commit)}
 		notifier.SendStage(stageReady, resolved.Name, affected, versions)
 		announced = true
 	}
 
-	executor := serviceExecutor{runner: runner, resolved: resolved, layout: layout, commit: commit, operation: operation.ID, live: map[string]string{}}
-	for service, record := range state.Services {
-		if record.Current != nil {
-			executor.live[service] = record.Current.Project
+	executors := map[string]*serviceExecutor{}
+	for _, run := range runs {
+		executor := &serviceExecutor{runner: run.runner, resolved: run.view, layout: run.layout, commit: commit, operation: operation.ID, live: map[string]string{}}
+		for service, record := range run.state.Services {
+			if record.Current != nil {
+				executor.live[service] = record.Current.Project
+			}
+		}
+		executors[run.name] = executor
+	}
+	// records what each destination actually has, whatever happened, so a
+	// failure part way leaves every destination's state true
+	recordAll := func() error {
+		var failures []error
+		for _, run := range runs {
+			run.state = executors[run.name].recordCutOver(run.state)
+			if _, err := WriteServiceState(run.runner, run.layout, run.state); err != nil {
+				failures = append(failures, fmt.Errorf("destination %s: %w", run.name, err))
+			}
+		}
+		return errors.Join(failures...)
+	}
+	discardAll := func() {
+		for _, run := range runs {
+			executors[run.name].discardCandidates()
 		}
 	}
-	if err := executor.startWaves(&state); err != nil {
-		executor.discardCandidates()
-		if _, writeErr := WriteServiceState(runner, layout, state); writeErr != nil {
-			return exitLiveButNeedsAHuman, fmt.Errorf("%w; recording the release task results also failed: %v", err, writeErr)
+
+	if err := runWaves(resolved, runs, executors); err != nil {
+		discardAll()
+		if writeErr := recordAll(); writeErr != nil {
+			return exitLiveButNeedsAHuman, fmt.Errorf("%w; recording what is live also failed: %v", err, writeErr)
+		}
+		return exitDeployFailed, err
+	}
+	if err := checkCrossHostPaths(resolved, runs, executors); err != nil {
+		discardAll()
+		if writeErr := recordAll(); writeErr != nil {
+			return exitLiveButNeedsAHuman, fmt.Errorf("%w; recording what is live also failed: %v", err, writeErr)
 		}
 		return exitDeployFailed, err
 	}
@@ -319,11 +363,34 @@ func RunServiceDeploy(options DeployOptions, repositoryPath string) (exitCode in
 	if len(stateless) > 0 {
 		notifier.SendStage(stageSwitching, resolved.Name, affected, versions)
 	}
-	cutoverErr := executor.cutover(&state)
-	state = executor.recordCutOver(state)
-	state, pruneErr := pruneServiceReleases(runner, layout, resolved.RuntimeID(), state, resolved.Retention)
-	if _, err := WriteServiceState(runner, layout, state); err != nil {
-		return exitLiveButNeedsAHuman, fmt.Errorf("%s is running, but recording it failed, so deploy has lost track of what is live: %w", ShortCommit(commit), err)
+	var cutoverErr error
+	for _, run := range runs {
+		if cutoverErr != nil {
+			executors[run.name].discardCandidates()
+			continue
+		}
+		if err := executors[run.name].cutover(&run.state); err != nil {
+			cutoverErr = err
+			if len(runs) > 1 {
+				cutoverErr = fmt.Errorf("destination %s: %w", run.name, err)
+			}
+		}
+	}
+	var pruneErrs []error
+	for _, run := range runs {
+		run.state = executors[run.name].recordCutOver(run.state)
+		var pruneErr error
+		if run.state, pruneErr = pruneServiceReleases(run.runner, run.layout, resolved.RuntimeID(), run.state, resolved.Retention); pruneErr != nil {
+			pruneErrs = append(pruneErrs, pruneErr)
+		}
+		if _, err := WriteServiceState(run.runner, run.layout, run.state); err != nil {
+			return exitLiveButNeedsAHuman, fmt.Errorf("%s is running on %s, but recording it failed, so deploy has lost track of what is live: %w", ShortCommit(commit), run.name, err)
+		}
+	}
+	if len(hosts) > 0 {
+		if err := recordWorkloads(ctx, resolved, hosts, runs); err != nil {
+			return exitLiveButNeedsAHuman, fmt.Errorf("%s is live, but recording the containers to start at boot failed, so a reboot would leave them stopped: %w", ShortCommit(commit), err)
+		}
 	}
 	if cutoverErr != nil {
 		return exitDeployFailed, cutoverErr
@@ -331,11 +398,136 @@ func RunServiceDeploy(options DeployOptions, repositoryPath string) (exitCode in
 	if announced {
 		notifier.SendStage(stageLive, resolved.Name, affected, versions)
 	}
-	if pruneErr != nil {
-		return exitLiveButNeedsAHuman, fmt.Errorf("%s is live, but pruning old releases failed: %w", ShortCommit(commit), pruneErr)
+	if err := errors.Join(pruneErrs...); err != nil {
+		return exitLiveButNeedsAHuman, fmt.Errorf("%s is live, but pruning old releases failed: %w", ShortCommit(commit), err)
 	}
 
 	return exitOK, nil
+}
+
+// runWaves runs release tasks and starts candidates wave by wave across every
+// destination, so whatever a service waits on is ready first, wherever it
+// runs. Candidates of one wave start together on all destinations.
+func runWaves(resolved ResolvedProject, runs []*destinationRun, executors map[string]*serviceExecutor) error {
+	waves, err := readinessWaves(resolved)
+	if err != nil {
+		return err
+	}
+	for _, run := range runs {
+		if err := executors[run.name].prepareTasks(); err != nil {
+			return fmt.Errorf("destination %s: %w", run.name, err)
+		}
+	}
+
+	for _, wave := range waves {
+		for _, run := range runs {
+			for _, name := range wave {
+				if _, task := run.view.Release[name]; task {
+					if err := executors[run.name].runTask(&run.state, name); err != nil {
+						return err
+					}
+				}
+			}
+		}
+
+		failures := make([]error, len(runs))
+		var group sync.WaitGroup
+		for index, run := range runs {
+			var starting []string
+			for _, name := range wave {
+				if service, found := run.view.Services[name]; found && !service.IsStateful() {
+					starting = append(starting, name)
+				}
+			}
+			group.Go(func() {
+				if err := executors[run.name].startCandidates(&run.state, starting); err != nil {
+					failures[index] = err
+					if len(runs) > 1 {
+						failures[index] = fmt.Errorf("destination %s: %w", run.name, err)
+					}
+				}
+			})
+		}
+		group.Wait()
+		if err := errors.Join(failures...); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// checkCrossHostPaths reaches each provider on another host the way its
+// consumer will, from the consumer's project network, before anything is
+// switched. Application authentication stays with each service's own checks.
+func checkCrossHostPaths(resolved ResolvedProject, runs []*destinationRun, executors map[string]*serviceExecutor) error {
+	for _, run := range runs {
+		for _, name := range executors[run.name].candidates {
+			service := run.view.Services[name]
+			for _, label := range slices.Sorted(maps.Keys(service.Connections)) {
+				connection := service.Connections[label]
+				provider := resolved.Services[connection.Service]
+				if resolved.destinationHost(provider.Destination) == resolved.destinationHost(service.Destination) {
+					continue
+				}
+				address := resolved.Network.Peers[provider.Destination].Address
+				port := provider.Endpoints[connection.Endpoint].HostPort
+				if err := reachableOnNetwork(run.runner, NetworkName(resolved.RuntimeID()), address, port); err != nil {
+					return fmt.Errorf("%s on %s cannot reach %s at %s:%d over the managed network: %w", name, run.name, connection.Service, address, port, err)
+				}
+				fmt.Printf("  %s reaches %s at %s:%d\n", name, connection.Service, address, port)
+			}
+		}
+	}
+
+	return nil
+}
+
+// recordWorkloads tells the network helper on each host which containers to
+// start once its network is up, from what each destination now records as
+// live there.
+func recordWorkloads(ctx context.Context, resolved ResolvedProject, hosts []networkHost, runs []*destinationRun) error {
+	for _, host := range hosts {
+		live := map[string]ServiceRelease{}
+		for _, run := range runs {
+			if !slices.Contains(host.Destinations, run.name) {
+				continue
+			}
+			for name, record := range run.state.Services {
+				if record.Current != nil {
+					live[name] = *record.Current
+				}
+			}
+		}
+		containers, err := workloadContainers(resolved, host.Name, live)
+		if err != nil {
+			return err
+		}
+		if _, err := callNetworkHelper(ctx, Destination{Host: host.Target}, "workloads", workloadsInput(resolved, containers)); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// indented prefixes every line written through it, so a stage's own output
+// sits under the deploy step that ran it.
+type indented struct{ out io.Writer }
+
+func (writer indented) Write(text []byte) (int, error) {
+	lines := strings.SplitAfter(string(text), "\n")
+	var buffer strings.Builder
+	for _, line := range lines {
+		if line != "" {
+			buffer.WriteString("    " + line)
+		}
+	}
+	if _, err := io.WriteString(writer.out, buffer.String()); err != nil {
+		return 0, err
+	}
+
+	return len(text), nil
 }
 
 // liveCommits summarizes what is serving before the deploy, which may be
@@ -369,44 +561,17 @@ func (executor *serviceExecutor) composeFile(release ServiceRelease) string {
 	return path.Join(executor.layout.Root, release.ComposeFile)
 }
 
-// startWaves runs release tasks and starts candidates wave by wave, so every
-// dependency is ready before what needs it starts. Nothing serving is stopped.
-func (executor *serviceExecutor) startWaves(state *ServiceState) error {
-	waves, err := readinessWaves(executor.resolved)
+// prepareTasks writes the release task stack for this destination's tasks.
+func (executor *serviceExecutor) prepareTasks() error {
+	if len(executor.resolved.Release) == 0 {
+		return nil
+	}
+	rendered, err := RenderReleaseTasks(executor.resolved, executor.layout, executor.commit)
 	if err != nil {
 		return err
 	}
-	if len(executor.resolved.Release) > 0 {
-		rendered, err := RenderReleaseTasks(executor.resolved, executor.layout, executor.commit)
-		if err != nil {
-			return err
-		}
-		if err := executor.runner.WriteFile(path.Join(executor.layout.Release(executor.commit), releaseTasksFileName), rendered); err != nil {
-			return err
-		}
-	}
 
-	for _, wave := range waves {
-		for _, name := range wave {
-			if _, task := executor.resolved.Release[name]; task {
-				if err := executor.runTask(state, name); err != nil {
-					return err
-				}
-			}
-		}
-
-		var starting []string
-		for _, name := range wave {
-			if service, found := executor.resolved.Services[name]; found && !service.IsStateful() {
-				starting = append(starting, name)
-			}
-		}
-		if err := executor.startCandidates(starting); err != nil {
-			return err
-		}
-	}
-
-	return nil
+	return executor.runner.WriteFile(path.Join(executor.layout.Release(executor.commit), releaseTasksFileName), rendered)
 }
 
 // runTask records the run as indeterminate before it starts, so a crash
@@ -451,11 +616,23 @@ func (executor *serviceExecutor) runTask(state *ServiceState, name string) error
 
 // startCandidates starts one wave together and waits for all of it, since
 // waiting on each in turn would make independent services wait on each other.
-func (executor *serviceExecutor) startCandidates(names []string) error {
-	if len(names) == 0 {
+// A service publishing a fixed port on the managed network cannot run beside
+// its live release, so it is replaced in place instead.
+func (executor *serviceExecutor) startCandidates(state *ServiceState, names []string) error {
+	var together []string
+	for _, name := range names {
+		if executor.fixedPort(name) {
+			if err := executor.recreate(state, name); err != nil {
+				return err
+			}
+			continue
+		}
+		together = append(together, name)
+	}
+	if len(together) == 0 {
 		return nil
 	}
-	for _, name := range names {
+	for _, name := range together {
 		release := serviceRelease(executor.resolved.RuntimeID(), name, executor.commit, "")
 		rendered, err := RenderServiceRelease(executor.resolved, executor.layout, name, executor.commit)
 		if err != nil {
@@ -466,9 +643,9 @@ func (executor *serviceExecutor) startCandidates(names []string) error {
 		}
 	}
 
-	failures := make([]error, len(names))
+	failures := make([]error, len(together))
 	var group sync.WaitGroup
-	for index, name := range names {
+	for index, name := range together {
 		release := serviceRelease(executor.resolved.RuntimeID(), name, executor.commit, "")
 		executor.candidates = append(executor.candidates, name)
 		group.Go(func() {
@@ -479,7 +656,59 @@ func (executor *serviceExecutor) startCandidates(names []string) error {
 	if err := errors.Join(failures...); err != nil {
 		return err
 	}
-	fmt.Printf("  %s up\n", strings.Join(names, ", "))
+	fmt.Printf("  %s up\n", strings.Join(together, ", "))
+
+	return nil
+}
+
+// fixedPort reports whether a stateless service publishes a host port on the
+// managed network, which two releases cannot hold at once.
+func (executor *serviceExecutor) fixedPort(name string) bool {
+	whole := executor.resolved.topology()
+	service := whole.Services[name]
+
+	return !service.IsStateful() && len(crossHostPorts(whole, name, service)) > 0
+}
+
+// recreate replaces a fixed-port service in place: the live release stops,
+// the candidate starts and must become healthy, and if it does not, the live
+// release is started again. This is downtime, and it is announced as such.
+func (executor *serviceExecutor) recreate(state *ServiceState, name string) error {
+	candidate := serviceRelease(executor.resolved.RuntimeID(), name, executor.commit, "")
+	rendered, err := RenderServiceRelease(executor.resolved, executor.layout, name, executor.commit)
+	if err != nil {
+		return err
+	}
+	if err := executor.runner.WriteFile(executor.composeFile(candidate), rendered); err != nil {
+		return err
+	}
+
+	live := state.Services[name].Current
+	var compose []string
+	if live != nil && live.Project != candidate.Project {
+		compose = []string{"docker", "compose", "--file", executor.composeFile(*live), "--project-name", live.Project}
+		fmt.Printf("  %s publishes a fixed port, so it is replaced in place; it is down until %s is healthy\n", name, ShortCommit(executor.commit))
+		if output, err := executor.runner.Run(append(slices.Clone(compose), "stop", name)); err != nil {
+			return fmt.Errorf("stopping %s %s: %s", live.Project, name, firstLine(output))
+		}
+	}
+	executor.candidates = append(executor.candidates, name)
+	if err := startStack(executor.runner, executor.composeFile(candidate), candidate.Project); err != nil {
+		if compose != nil {
+			if output, startErr := executor.runner.Run(append(slices.Clone(compose), "start", name)); startErr != nil {
+				return fmt.Errorf("%w, and %s could not be started again either, so nothing is serving it: %s", err, live.Project, firstLine(output))
+			}
+			return fmt.Errorf("%w; %s is serving again", err, live.Project)
+		}
+		return err
+	}
+	if compose != nil {
+		if output, err := executor.runner.Run(append(slices.Clone(compose), "rm", "--force", name)); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: could not remove the stopped %s from %s: %s\n", name, live.Project, firstLine(output))
+		}
+	}
+	executor.cutOver = append(executor.cutOver, name)
+	fmt.Printf("  %s up\n", name)
 
 	return nil
 }
@@ -501,6 +730,9 @@ func (executor *serviceExecutor) discardCandidates() {
 // stay moved and are recorded as such.
 func (executor *serviceExecutor) cutover(state *ServiceState) error {
 	for _, name := range executor.candidates {
+		if slices.Contains(executor.cutOver, name) {
+			continue
+		}
 		candidate := serviceRelease(executor.resolved.RuntimeID(), name, executor.commit, "")
 		live := state.Services[name].Current
 		if live == nil || live.Project == candidate.Project {

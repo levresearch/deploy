@@ -492,46 +492,56 @@ func RunNetworkApply(directory, environment string, out io.Writer) (exitCode int
 	if err != nil {
 		return exitPreconditionNotMet, err
 	}
-
-	// observe again under the locks; what was seen before them may be stale
-	reports, err := inspectNetwork(ctx, resolved, network.hosts, callNetworkHelper)
-	if err != nil {
+	if err := applyNetwork(ctx, resolved, network.hosts, runners, network.observations, operation.ID, out); err != nil {
 		return exitDeployFailed, err
+	}
+	return exitOK, nil
+}
+
+// applyNetwork converges the managed network under locks the caller holds:
+// it observes again, enrolls hosts that have no identity yet, applies each
+// host in turn and records a generation on each of its destinations against
+// the caller's operation.
+func applyNetwork(ctx context.Context, resolved ResolvedProject, hosts []networkHost, runners map[string]Runner, observations map[string]DestinationObservation, operation string, out io.Writer) error {
+	// observe again under the locks; what was seen before them may be stale
+	reports, err := inspectNetwork(ctx, resolved, hosts, callNetworkHelper)
+	if err != nil {
+		return err
 	}
 	enrolled := false
 	for _, report := range reports {
 		if report.Observed.Owner {
 			continue
 		}
-		host := network.hosts[slices.IndexFunc(network.hosts, func(host networkHost) bool { return host.Name == report.Host })]
+		host := hosts[slices.IndexFunc(hosts, func(host networkHost) bool { return host.Name == report.Host })]
 		output, err := callNetworkHelper(ctx, Destination{Host: host.Target}, "enroll", interfaceInput(host.Network))
 		if err != nil {
-			return exitDeployFailed, err
+			return err
 		}
 		if !enrolledKeyPattern.MatchString(output) {
-			return exitDeployFailed, fmt.Errorf("%s: enroll returned no public key", host.Target)
+			return fmt.Errorf("%s: enroll returned no public key", host.Target)
 		}
 		fmt.Fprintf(out, "%s: enrolled %s\n", report.label(), host.Network.Interface)
 		enrolled = true
 	}
 	if enrolled {
-		if reports, err = inspectNetwork(ctx, resolved, network.hosts, callNetworkHelper); err != nil {
-			return exitDeployFailed, err
+		if reports, err = inspectNetwork(ctx, resolved, hosts, callNetworkHelper); err != nil {
+			return err
 		}
 	}
 
 	changedHosts := 0
 	for index, report := range reports {
-		host := network.hosts[index]
+		host := hosts[index]
 		if report.input == "" {
-			return exitDeployFailed, fmt.Errorf("%s: a peer has no public key after enrolling", report.Target)
+			return fmt.Errorf("%s: a peer has no public key after enrolling", report.Target)
 		}
 		output, err := callNetworkHelper(ctx, Destination{Host: host.Target}, "apply", report.input)
 		if err != nil {
 			if index > 0 {
 				err = fmt.Errorf("%w; hosts before it were applied, apply again once it is fixed", err)
 			}
-			return exitDeployFailed, err
+			return err
 		}
 		changed := strings.TrimSpace(output) != "unchanged"
 		if changed {
@@ -543,10 +553,10 @@ func RunNetworkApply(directory, environment string, out io.Writer) (exitCode int
 
 		digest := helperInputDigest(report.input)
 		for _, name := range host.Destinations {
-			layout := NewLayout(network.observations[name].CanonicalPath, resolved.RuntimeID())
+			layout := NewLayout(observations[name].CanonicalPath, resolved.RuntimeID())
 			record, _, err := readNetworkRecord(runners[name], layout)
 			if err != nil {
-				return exitDeployFailed, fmt.Errorf("destination %s: %w", name, err)
+				return fmt.Errorf("destination %s: %w", name, err)
 			}
 			if !changed && record.Applied == digest {
 				continue
@@ -554,15 +564,15 @@ func RunNetworkApply(directory, environment string, out io.Writer) (exitCode int
 			record = NetworkRecord{
 				Version: networkRecordVersion, Project: resolved.RuntimeID(), Environment: resolved.Environment,
 				Destination: name, Interface: host.Network.Interface, Generation: record.Generation + 1,
-				Applied: digest, Operation: operation.ID, UpdatedAt: time.Now().UTC().Truncate(time.Second),
+				Applied: digest, Operation: operation, UpdatedAt: time.Now().UTC().Truncate(time.Second),
 			}
 			if err := writeNetworkRecord(runners[name], layout, record); err != nil {
-				return exitDeployFailed, fmt.Errorf("destination %s: %w", name, err)
+				return fmt.Errorf("destination %s: %w", name, err)
 			}
 		}
 	}
 	if changedHosts == 0 {
 		fmt.Fprintln(out, "nothing changed")
 	}
-	return exitOK, nil
+	return nil
 }

@@ -85,6 +85,7 @@ func topologyService(resolved ResolvedProject, name string, service Service) (Se
 	if resolved.Version != 2 {
 		return service, nil
 	}
+	resolved = resolved.topology()
 	environment, err := connectionEnvironment(resolved, name, service)
 	if err != nil {
 		return Service{}, err
