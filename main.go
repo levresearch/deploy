@@ -368,6 +368,9 @@ usage:
   deploy network bootstrap
                           install the root network helper on each host of the
                           managed network, using your sudo once per host
+  deploy network status|plan|apply
+                          show, preview or converge the managed network on
+                          every host of the environment
 
 flags:
   -C, --context <path>      scope deploy to this path instead of the cwd

@@ -164,7 +164,11 @@ func TestNetworkHostsReachEachHostThroughOneDestination(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(hosts) != 2 || hosts[0] != (networkHost{Name: "app-host", Target: "app-host"}) || hosts[1] != (networkHost{Name: "data-host", Target: "data-host"}) {
+	if len(hosts) != 2 || hosts[0].Name != "app-host" || hosts[0].Target != "app-host" || strings.Join(hosts[0].Destinations, ",") != "app" ||
+		hosts[1].Name != "data-host" || hosts[1].Target != "data-host" || strings.Join(hosts[1].Destinations, ",") != "data" {
 		t.Fatalf("hosts %+v", hosts)
+	}
+	if hosts[0].Network.Address != "10.77.0.1" || hosts[1].Network.Address != "10.77.0.2" {
+		t.Fatalf("networks %+v", hosts)
 	}
 }

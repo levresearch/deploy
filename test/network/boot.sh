@@ -35,6 +35,8 @@ runcmd:
   - mount -t 9p -o trans=virtio,version=9p2000.L lab /mnt/lab
   - tar -xzf /mnt/lab/docker.tgz -C /usr/local/bin --strip-components=1
   - cp /mnt/lab/docker.service /etc/systemd/system/docker.service
+  - groupadd -f docker
+  - usermod -aG docker deployer
   - systemctl daemon-reload
   - systemctl enable --now docker
   - touch /root/ready
