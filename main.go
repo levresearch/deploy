@@ -36,6 +36,7 @@ func init() {
 		"rollback": runRollback,
 		"resolve":  runResolve,
 		"adopt":    runAdopt,
+		"network":  runNetwork,
 		"destroy":  runDestroy,
 		"dwh":      runConfigureWebhook,
 		"status":   func(args []string) int { return runInspect(args, "status") },
@@ -364,6 +365,9 @@ usage:
                           checking what it changed
   deploy adopt [--write]  record a version 1 deployment per service so a
                           version 2 config can deploy it; previews without --write
+  deploy network bootstrap
+                          install the root network helper on each host of the
+                          managed network, using your sudo once per host
 
 flags:
   -C, --context <path>      scope deploy to this path instead of the cwd

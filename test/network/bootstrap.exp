@@ -1,0 +1,17 @@
+# drives deploy network bootstrap the way an operator would: confirm once,
+# then type the sudo password on each host
+set timeout 180
+spawn /lab/bin/deploy network bootstrap -C /lab/project
+expect {
+  "type bootstrap to continue: " { send "bootstrap\r" }
+  timeout { exit 90 }
+}
+for {set host 0} {$host < 2} {incr host} {
+  expect {
+    "password for deployer:" { send "lab-only-sudo\r" }
+    timeout { exit 91 }
+  }
+}
+expect eof
+lassign [wait] pid spawned os_error status
+exit $status

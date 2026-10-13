@@ -21,6 +21,13 @@ users:
   - name: root
     ssh_authorized_keys:
       - $(cat id_ed25519.pub)
+  - name: deployer
+    shell: /bin/bash
+    lock_passwd: false
+    plain_text_passwd: lab-only-sudo
+    sudo: 'ALL=(ALL) ALL'
+    ssh_authorized_keys:
+      - $(cat id_ed25519.pub)
 package_update: true
 packages: [wireguard-tools, iptables, ufw, conntrack, curl]
 runcmd:
