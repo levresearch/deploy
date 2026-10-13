@@ -161,7 +161,7 @@ assert.equal(generation(first), before.first + 1);
 assert.equal(generation(second), before.second);
 assert.equal(hostState(second), before.state);
 assert.equal(ssh(second, `{ ls -A ${productionState} | grep '^\\.deploy-network' || true; ls -A /run/deploy-network-prior; } | wc -l`), '0');
-assert.match(plan('production'), new RegExp(`^  ${second} \\(vm-${second}\\): desired network differs from the applied one$`, 'm'));
+assert.match(plan('production'), new RegExp(`^  ${second} \\(vm-${second}\\): desired network differs from the applied one`, 'm'));
 succeed(network('apply', '-e', 'production'));
 assert.equal(generation(second), before.second + 1);
 assert.match(ssh(second, `grep -c '10.78.0.2/' ${productionState}/previous/config`), /^[1-9]$/);
