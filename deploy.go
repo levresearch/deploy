@@ -709,8 +709,10 @@ func startStack(runner Runner, composeFile, projectName string, extra ...string)
 	if err := runner.Stream(up, os.Stdout); err != nil {
 		// compose exits non-zero with nothing useful on stdout, and by the time
 		// anyone runs deploy logs the container is often gone, so dump them here
-		dumpFailureLogs(runner, composeFile, projectName)
-		tearDown(runner, composeFile, projectName)
+		// the env files go along too, or compose cannot interpolate the tunnel
+		// token and refuses to read logs or tear the stack down
+		dumpFailureLogs(runner, composeFile, projectName, extra...)
+		tearDown(runner, composeFile, projectName, extra...)
 
 		return fmt.Errorf("%s never became healthy, so it was torn down and nothing was cut over", projectName)
 	}
@@ -718,28 +720,20 @@ func startStack(runner Runner, composeFile, projectName string, extra ...string)
 	return nil
 }
 
-func dumpFailureLogs(runner Runner, composeFile, projectName string) {
+func dumpFailureLogs(runner Runner, composeFile, projectName string, extra ...string) {
 	fmt.Fprintf(os.Stderr, "\n--- logs from %s ---\n", projectName)
 
-	logs := []string{
-		"docker", "compose",
-		"--file", composeFile,
-		"--project-name", projectName,
-		"logs", "--tail", "50",
-	}
+	logs := append([]string{"docker", "compose", "--file", composeFile}, extra...)
+	logs = append(logs, "--project-name", projectName, "logs", "--tail", "50")
 	if err := runner.Stream(logs, os.Stderr); err != nil {
 		fmt.Fprintf(os.Stderr, "(could not read logs: %v)\n", err)
 	}
 	fmt.Fprintf(os.Stderr, "--- end logs ---\n\n")
 }
 
-func tearDown(runner Runner, composeFile, projectName string) {
-	down := []string{
-		"docker", "compose",
-		"--file", composeFile,
-		"--project-name", projectName,
-		"down",
-	}
+func tearDown(runner Runner, composeFile, projectName string, extra ...string) {
+	down := append([]string{"docker", "compose", "--file", composeFile}, extra...)
+	down = append(down, "--project-name", projectName, "down")
 	if _, err := runner.Run(down); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: could not tear down %s: %v\n", projectName, err)
 	}

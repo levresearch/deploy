@@ -611,3 +611,27 @@ func TestLayoutKeepsVolumesOutsideReleases(t *testing.T) {
 		t.Error("every release must live under releases/, which is what the pruner is allowed to touch")
 	}
 }
+
+// a shared stack that fails to come up still interpolates its tunnel token, so
+// reading its logs and tearing it down need the same env files as starting it.
+func TestAFailedStackKeepsItsEnvFilesForLogsAndTeardown(t *testing.T) {
+	runner := newScriptedRunner()
+	runner.failCommands = []string{" up "}
+	envFiles := []string{"--env-file", "/srv/env/tunnel.env"}
+
+	if err := startStack(runner, "/srv/shared/docker-compose.yml", "deploy-x-shared", envFiles...); err == nil {
+		t.Fatal("a stack that never became healthy must fail")
+	}
+
+	var logs, down bool
+	for _, command := range runner.ran {
+		if !strings.Contains(command, "--env-file /srv/env/tunnel.env") {
+			t.Errorf("compose ran without the env files: %s", command)
+		}
+		logs = logs || strings.HasSuffix(command, " logs --tail 50")
+		down = down || strings.HasSuffix(command, " down")
+	}
+	if !logs || !down {
+		t.Errorf("expected logs and a teardown after the failure, got %v", runner.ran)
+	}
+}
