@@ -467,3 +467,64 @@ func TestBuildOnDestinationCanComeFromTheConfig(t *testing.T) {
 func boolPointer(value bool) *bool {
 	return &value
 }
+
+const disabledServiceConfig = `{
+  "version": 1,
+  "id": "a3f19c02",
+  "name": "status",
+  "destination": "/srv/projects",
+  "services": {
+    "web": { "build": "Dockerfile", "stateful": false },
+    "worker": { "build": "Dockerfile.worker", "stateful": false },
+    "preview": { "build": "Dockerfile", "stateful": false, "enabled": false }
+  },
+  "release": {
+    "migrate": { "build": "Dockerfile.worker", "command": "migrate" }
+  },
+  "environments": {
+    "production": {},
+    "staging": {
+      "services": {
+        "worker": { "enabled": false },
+        "preview": { "enabled": true }
+      },
+      "release": { "migrate": { "enabled": false } }
+    }
+  }
+}`
+
+func TestEnabledFalseLeavesAServiceOutOfItsEnvironment(t *testing.T) {
+	production := loadAndResolve(t, disabledServiceConfig, "production")
+	if _, found := production.Services["preview"]; found {
+		t.Error("a base service marked enabled false should not resolve")
+	}
+	if _, found := production.Services["worker"]; !found {
+		t.Error("production keeps the worker")
+	}
+	if _, found := production.Release["migrate"]; !found {
+		t.Error("production keeps the release task")
+	}
+	for name, service := range production.Services {
+		if service.Enabled != nil {
+			t.Errorf("%s still carries the enabled flag, which would change its digest", name)
+		}
+	}
+
+	staging := loadAndResolve(t, disabledServiceConfig, "staging")
+	if _, found := staging.Services["worker"]; found {
+		t.Error("staging disables the worker")
+	}
+	if _, found := staging.Release["migrate"]; found {
+		t.Error("staging disables the release task")
+	}
+	preview, found := staging.Services["preview"]
+	if !found {
+		t.Fatal("staging enables the preview the base config leaves out")
+	}
+	if len(preview.Build) == 0 {
+		t.Error("an enabled override keeps the base build")
+	}
+	if nodeDigest(staging.Services["web"]) != nodeDigest(production.Services["web"]) {
+		t.Error("an untouched service should have the same digest in both environments")
+	}
+}

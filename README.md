@@ -194,6 +194,7 @@ everything deploy knows about, and what you can put in it.
 | `env` | `[".env.production"]` | env files. a bare name is one you pushed with deploy env push, anything with a slash in it is a file you committed with your code |
 | `host` | object | put it on the internet through a cloudflare tunnel |
 | `dependsOn` | `{ "worker": "healthy" }` | wait on another service in the same release. takes `healthy`, `completed`, or `started` |
+| `enabled` | `true` / `false`, default `true` | `false` leaves the service out entirely. set it in an environment to drop a service that environment would otherwise inherit, like `"staging": { "services": { "worker": { "enabled": false } } }`. works on release tasks too |
 | `healthcheck` | object | how deploy knows it actually came up. anything hosted needs one |
 | anything else | whatever compose takes | `ports`, `volumes`, `environment`, `command`, `restart`, `logging`, `mem_limit`, `cap_add`, all of it goes straight through untouched |
 

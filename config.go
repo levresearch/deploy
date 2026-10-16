@@ -62,7 +62,9 @@ type Service struct {
 	Host        *Host
 	DependsOn   map[string]string
 	Healthcheck json.RawMessage
-	Extra       map[string]json.RawMessage
+	// Enabled false leaves the service out of the resolved project, so an environment can drop one it inherits.
+	Enabled *bool
+	Extra   map[string]json.RawMessage
 }
 
 type Host struct {
@@ -182,6 +184,8 @@ func (project Project) ResolveEnvironment(environmentName string) (ResolvedProje
 			release[name] = mergeService(release[name], override, project.Version)
 		}
 	}
+	dropDisabled(services)
+	dropDisabled(release)
 
 	retention := project.Retention
 	if retention == 0 {
@@ -203,6 +207,19 @@ func (project Project) ResolveEnvironment(environmentName string) (ResolvedProje
 		Services:           services,
 		Release:            release,
 	}, nil
+}
+
+// dropDisabled removes services marked enabled false and clears the flag on
+// the rest, so it never changes the digest of a service that stays.
+func dropDisabled(services map[string]Service) {
+	for name, service := range services {
+		if service.Enabled != nil && !*service.Enabled {
+			delete(services, name)
+			continue
+		}
+		service.Enabled = nil
+		services[name] = service
+	}
 }
 
 // mergeService overrides field by field rather than replacing the whole service,
@@ -239,6 +256,9 @@ func mergeService(base, override Service, version int) Service {
 	}
 	if override.Healthcheck != nil {
 		merged.Healthcheck = override.Healthcheck
+	}
+	if override.Enabled != nil {
+		merged.Enabled = override.Enabled
 	}
 
 	if len(override.Extra) > 0 {
