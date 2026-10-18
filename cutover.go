@@ -61,6 +61,7 @@ func renderTunnels(resolved ResolvedProject) (map[string]json.RawMessage, error)
 			"security_opt": []string{"no-new-privileges:true"},
 			"pids_limit":   256,
 			"mem_limit":    "256m",
+			"cpus":         1,
 		}
 
 		encoded, err := json.Marshal(fields)
