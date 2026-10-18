@@ -89,9 +89,10 @@ func ensurePrivateNetworks(runner Runner, resolved ResolvedProject) error {
 	return nil
 }
 
-// validatePrivateNetworks checks that every private network actually isolates
-// something and that nothing which must reach an isolated service is left
-// outside its network.
+// validatePrivateNetworks checks that nothing which must reach an isolated
+// service is left outside its network. Joining a network nothing is isolated in
+// yet is allowed on purpose: deploying the joins first and the isolation after
+// moves a running database without cutting off the releases still using it.
 func validatePrivateNetworks(resolved ResolvedProject) []error {
 	var problems []error
 	all := map[string]Service{}
@@ -128,11 +129,6 @@ func validatePrivateNetworks(resolved ResolvedProject) []error {
 				))
 			case seen[joined]:
 				problems = append(problems, fmt.Errorf("service %q joins %q twice", name, joined))
-			case len(isolatedIn[joined]) == 0:
-				problems = append(problems, fmt.Errorf(
-					"service %q joins %q, but no service is isolated in it, so there is nothing to reach there",
-					name, joined,
-				))
 			}
 			seen[joined] = true
 		}

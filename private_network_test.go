@@ -98,7 +98,6 @@ func TestPrivateNetworkMistakesAreRefused(t *testing.T) {
 	}{
 		"isolated and joining": {`"db": {"image": "x", "isolated": "auth", "joins": ["auth"]}`, "also joins"},
 		"bad name":             {`"db": {"image": "x", "isolated": "Auth"}`, "lowercase name"},
-		"joining nothing":      {`"web": {"image": "x", "joins": ["auth"]}`, "no service is isolated in it"},
 		"joining twice":        {`"db": {"image": "x", "isolated": "auth"}, "web": {"image": "x", "joins": ["auth", "auth"]}`, "twice"},
 		"hosted": {`"db": {"image": "x", "isolated": "auth", "healthcheck": {"command": ["CMD", "true"]},
 		  "host": {"domain": "a.example.com", "port": 80, "tunnelTokenFrom": "T"}}`, "tunnel could never reach it"},
@@ -118,6 +117,10 @@ func TestPrivateNetworkMistakesAreRefused(t *testing.T) {
 
 	if err := loadAndResolve(t, privateConfig, defaultEnvironmentName).Validate(); err != nil {
 		t.Fatalf("a correct private network was refused: %v", err)
+	}
+	joinsFirst := `{"version": 1, "id": "a3f19c02", "name": "x", "services": {"db": {"image": "x", "stateful": true}, "web": {"image": "x", "joins": ["auth"]}}}`
+	if err := loadAndResolve(t, joinsFirst, defaultEnvironmentName).Validate(); err != nil {
+		t.Fatalf("joining ahead of the isolation, the gapless first step, was refused: %v", err)
 	}
 }
 
@@ -229,31 +232,40 @@ func TestAnIsolatedServiceIsUnreachableFromOutsideItsNetwork(t *testing.T) {
 	destination := t.TempDir()
 
 	listener := `"image": "busybox:latest", "command": ["sh", "-c", "while true; do echo sealed | nc -l -p 7000; done"], "healthcheck": {"command": ["CMD", "true"], "interval": "1s", "retries": 5}`
-	commitFile(t, repository, configFileName, `{"version": 2, "id": "`+id+`", "name": "isolation", "retention": 2,
-	  "destinations": {"main": "`+destination+`"},
-	  "services": {
-	    "vault": {`+listener+`, "destination": "main", "stateful": true, "isolated": "vault"},
-	    "member": {`+sleeper+`, "destination": "main", "joins": ["vault"], "dependsOn": {"vault": "healthy"}},
-	    "outsider": {`+sleeper+`, "destination": "main"}
-	  }}`)
-	commit, err := ResolveCommit(repository, "HEAD")
-	if err != nil {
-		t.Fatal(err)
+	config := func(vault string) string {
+		return `{"version": 2, "id": "` + id + `", "name": "isolation", "retention": 2,
+		  "destinations": {"main": "` + destination + `"},
+		  "services": {
+		    "vault": {` + listener + `, "destination": "main", "stateful": true` + vault + `},
+		    "member": {` + sleeper + `, "destination": "main", "joins": ["vault"]},
+		    "outsider": {` + sleeper + `, "destination": "main"}
+		  }}`
 	}
+	reach := func(service string) (string, error) {
+		project := recordedState(t, destination, id).Services[service].Current.Project
+		output, err := exec.Command("docker", "compose", "--project-name", project, "exec", "-T", service,
+			"sh", "-c", "nc -w 3 vault 7000 </dev/null").CombinedOutput()
+		return string(output), err
+	}
+
+	// the gapless order: everything that uses the vault joins its network first,
+	// and only then is the vault moved onto it
+	commitFile(t, repository, configFileName, config(""))
 	if code, err := RunDeploy(DeployOptions{Context: repository}); code != exitOK || err != nil {
-		t.Fatalf("deploy: %d %v", code, err)
+		t.Fatalf("first deploy: %d %v", code, err)
+	}
+	if output, err := reach("outsider"); err != nil || !strings.Contains(output, "sealed") {
+		t.Fatalf("before isolation everything should reach the vault: %v %s", err, output)
+	}
+
+	commitFile(t, repository, configFileName, config(`, "isolated": "vault"`))
+	if code, err := RunDeploy(DeployOptions{Context: repository}); code != exitOK || err != nil {
+		t.Fatalf("isolating deploy: %d %v", code, err)
 	}
 
 	internal, err := exec.Command("docker", "network", "inspect", "--format", "{{.Internal}}", PrivateNetworkName(id, "vault")).Output()
 	if err != nil || strings.TrimSpace(string(internal)) != "true" {
 		t.Fatalf("the private network is not internal: %q %v", internal, err)
-	}
-
-	reach := func(service string) (string, error) {
-		project := ServiceReleaseProject(id, service, commit)
-		output, err := exec.Command("docker", "compose", "--project-name", project, "exec", "-T", service,
-			"sh", "-c", "nc -w 3 vault 7000 </dev/null").CombinedOutput()
-		return string(output), err
 	}
 	if output, err := reach("member"); err != nil || !strings.Contains(output, "sealed") {
 		t.Fatalf("a service that joins the network could not reach it: %v %s", err, output)

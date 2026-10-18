@@ -236,6 +236,7 @@ every service sits on one project network, so by default your api, your workers 
 - `isolated` puts a service on the private network only. nothing else can resolve its name or reach its ports, and it cannot reach the internet, since deploy creates the network as an internal docker network.
 - `joins` adds the private network beside the project network, so the service reaches what is isolated there and everything else as usual.
 - anything with a `dependsOn` on an isolated service has to join its network, an isolated service cannot be hosted, publish `ports` or declare endpoints, and every member has to be on the same destination. deploy check tells you which rule you broke.
+- to fence off a database that is already running without cutting anything off, deploy twice: first with `joins` on everything that uses it, then with `isolated` on the database. the releases from the first deploy are already on the private network when the database moves onto it.
 - if a network with the same name already exists and is not internal, deploy refuses to use it rather than quietly losing the isolation. destroy removes private networks with the project network.
 
 **locking a container down**
