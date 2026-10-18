@@ -22,6 +22,8 @@ type serviceFields struct {
 	DependsOn   map[string]string     `json:"dependsOn,omitempty"`
 	Healthcheck json.RawMessage       `json:"healthcheck,omitempty"`
 	Enabled     *bool                 `json:"enabled,omitempty"`
+	Isolated    string                `json:"isolated,omitempty"`
+	Joins       []string              `json:"joins,omitempty"`
 }
 
 func (service *Service) UnmarshalJSON(raw []byte) error {
@@ -69,6 +71,10 @@ func (service *Service) UnmarshalJSON(raw []byte) error {
 			if err = json.Unmarshal(value, &enabled); err == nil {
 				service.Enabled = &enabled
 			}
+		case "isolated":
+			err = json.Unmarshal(value, &service.Isolated)
+		case "joins":
+			err = json.Unmarshal(value, &service.Joins)
 		default:
 			if service.Extra == nil {
 				service.Extra = map[string]json.RawMessage{}
@@ -97,6 +103,8 @@ func (service Service) MarshalJSON() ([]byte, error) {
 		DependsOn:   service.DependsOn,
 		Healthcheck: service.Healthcheck,
 		Enabled:     service.Enabled,
+		Isolated:    service.Isolated,
+		Joins:       service.Joins,
 	})
 	if err != nil {
 		return nil, err

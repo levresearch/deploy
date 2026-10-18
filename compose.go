@@ -159,6 +159,11 @@ func renderProject(
 			"default": map[string]any{"name": NetworkName(resolved.RuntimeID()), "external": true},
 		},
 	}
+	// private networks are made by deploy before any stack starts, like the
+	// project network, so every stack only refers to them
+	for _, network := range privateNetworksOf(services) {
+		project.Networks[network] = map[string]any{"name": PrivateNetworkName(resolved.RuntimeID(), network), "external": true}
+	}
 
 	// both stacks reference the same volumes, and neither creates them, because
 	// deploy makes them itself with a stable name that no project name prefixes
@@ -221,6 +226,12 @@ func renderService(
 
 	if err := setDependsOn(fields, service, siblings); err != nil {
 		return nil, err
+	}
+
+	if networks := serviceNetworks(service); networks != nil {
+		if err := setField(fields, "networks", networks); err != nil {
+			return nil, err
+		}
 	}
 
 	return json.Marshal(fields)

@@ -196,6 +196,8 @@ everything deploy knows about, and what you can put in it.
 | `dependsOn` | `{ "worker": "healthy" }` | wait on another service in the same release. takes `healthy`, `completed`, or `started` |
 | `enabled` | `true` / `false`, default `true` | `false` leaves the service out entirely. set it in an environment to drop a service that environment would otherwise inherit, like `"staging": { "services": { "worker": { "enabled": false } } }`. works on release tasks too |
 | `healthcheck` | object | how deploy knows it actually came up. anything hosted needs one |
+| `isolated` | `"auth"` | put it on that private network and nowhere else, see private networks below |
+| `joins` | `["auth"]` | also put it on these private networks, so it can reach what is isolated there |
 | anything else | whatever compose takes | `ports`, `volumes`, `environment`, `command`, `restart`, `logging`, `mem_limit`, `cap_add`, all of it goes straight through untouched |
 
 **healthcheck**
@@ -219,7 +221,36 @@ everything deploy knows about, and what you can put in it.
 
 three rules deploy will hold you to: anything hosted needs a healthcheck, has to be `stateful: false`, and can't publish `ports`. two copies of the same service can't both bind 3000, which is the whole reason the cutover works.
 
-one cloudflared per host block, so two hostnames means two tunnels and two tokens.
+one cloudflared per host block, so two hostnames means two tunnels and two tokens. each one runs locked down: read only, no capabilities, no new privileges, and capped at 256 processes and 256 MB.
+
+**private networks**
+
+every service sits on one project network, so by default your api, your workers and your tunnels can all reach your database's port. a private network fences something off:
+
+```jsonc
+"auth-db":     { "image": "postgres:18", "stateful": true, "isolated": "auth" },
+"auth":        { "build": "Dockerfile", "joins": ["auth"], "host": { ... } },
+"auth-migrate":{ "build": "Dockerfile", "isolated": "auth" }   // a release task works too
+```
+
+- `isolated` puts a service on the private network only. nothing else can resolve its name or reach its ports, and it cannot reach the internet, since deploy creates the network as an internal docker network.
+- `joins` adds the private network beside the project network, so the service reaches what is isolated there and everything else as usual.
+- anything with a `dependsOn` on an isolated service has to join its network, an isolated service cannot be hosted, publish `ports` or declare endpoints, and every member has to be on the same destination. deploy check tells you which rule you broke.
+- if a network with the same name already exists and is not internal, deploy refuses to use it rather than quietly losing the isolation. destroy removes private networks with the project network.
+
+**locking a container down**
+
+deploy passes compose keys it does not own straight through, so hardening a service is a few keys on it:
+
+```jsonc
+"read_only": true,
+"tmpfs": ["/tmp"],
+"cap_drop": ["ALL"],
+"security_opt": ["no-new-privileges:true"],
+"pids_limit": 256,
+"mem_limit": "512m",
+"user": "1000:1000"
+```
 
 **notify**
 
@@ -410,7 +441,7 @@ There is no root `destination` in version 2. Services and tasks inherit an expli
 
 `dependsOn` controls readiness waves; `connections` controls communication. Bidirectional connections do not create a readiness cycle. `completed` requires a release task, and `healthy` requires an enabled health check. A release task must wait for its connection providers to be healthy. Service/task names cannot overlap.
 
-Endpoint and connection overrides replace whole named entries; an empty map clears inherited entries. An empty `dependsOn` clears inherited dependencies. An environment's network replaces the entire network definition. Non-production environments must be declared explicitly. Environments sharing a host need distinct network subnets and listen ports. Raw Compose topology overrides such as `network_mode`, `networks`, `depends_on`, privileged capabilities and `container_name` are refused. Use `env` for secret-file references; raw `env_file` is refused. Endpoint declarations cannot be combined with raw `ports` on the same service.
+Endpoint and connection overrides replace whole named entries; an empty map clears inherited entries. An empty `dependsOn` clears inherited dependencies. An environment's network replaces the entire network definition. Non-production environments must be declared explicitly. Environments sharing a host need distinct network subnets and listen ports. Raw Compose topology overrides such as `network_mode`, `networks`, `depends_on`, privileged capabilities and `container_name` are refused; use `isolated` and `joins` for private networks. Use `env` for secret-file references; raw `env_file` is refused. Endpoint declarations cannot be combined with raw `ports` on the same service.
 
 A single-host plan, or several hosts without cross-host connections, needs only Docker networking. An unchanged network will eventually be reconciled without restarts, but this offline plan cannot determine actual changes. Host identity, SSH aliases, canonical paths, live releases, runtime environment collisions and firewall/route availability remain unverified. Same literal SSH hostnames are configuration hints, not verified machine identities. Retained releases may still need an existing tunnel. No interface, key, route, firewall rule or deployment directory is created by these commands.
 

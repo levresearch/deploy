@@ -53,6 +53,14 @@ func renderTunnels(resolved ResolvedProject) (map[string]json.RawMessage, error)
 				),
 			},
 			"restart": "unless-stopped",
+			// cloudflared only needs the network and its token, so the container
+			// gets nothing else: no writable filesystem, no capabilities, and no
+			// way to gain privileges if the binary were ever turned against us
+			"read_only":    true,
+			"cap_drop":     []string{"ALL"},
+			"security_opt": []string{"no-new-privileges:true"},
+			"pids_limit":   256,
+			"mem_limit":    "256m",
 		}
 
 		encoded, err := json.Marshal(fields)

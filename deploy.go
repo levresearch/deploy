@@ -608,6 +608,9 @@ func startShared(runner Runner, layout Layout, resolved ResolvedProject, commit 
 			)
 		}
 	}
+	if err := ensurePrivateNetworks(runner, resolved); err != nil {
+		return nil, err
+	}
 	for _, volume := range VolumesFor(resolved) {
 		if _, err := runner.Run([]string{"docker", "volume", "create", volume}); err != nil {
 			return nil, fmt.Errorf("creating volume %s: %w", volume, err)
