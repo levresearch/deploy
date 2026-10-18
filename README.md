@@ -221,7 +221,7 @@ everything deploy knows about, and what you can put in it.
 
 three rules deploy will hold you to: anything hosted needs a healthcheck, has to be `stateful: false`, and can't publish `ports`. two copies of the same service can't both bind 3000, which is the whole reason the cutover works.
 
-one cloudflared per host block, so two hostnames means two tunnels and two tokens. each one runs locked down: read only, no capabilities, no new privileges, and capped at 256 processes and 256 MB.
+one cloudflared per host block, so two hostnames means two tunnels and two tokens. each one runs locked down: read only, no capabilities, no new privileges, and capped at 256 processes, 256 MB and one cpu.
 
 **private networks**
 

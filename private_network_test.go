@@ -209,11 +209,12 @@ func TestTunnelsRunWithoutPrivileges(t *testing.T) {
 			CapDrop     []string `json:"cap_drop"`
 			SecurityOpt []string `json:"security_opt"`
 			PidsLimit   int      `json:"pids_limit"`
+			Cpus        float64  `json:"cpus"`
 		}
 		if err := json.Unmarshal(raw, &tunnel); err != nil {
 			t.Fatal(err)
 		}
-		if !tunnel.ReadOnly || !slices.Equal(tunnel.CapDrop, []string{"ALL"}) || !slices.Contains(tunnel.SecurityOpt, "no-new-privileges:true") || tunnel.PidsLimit == 0 {
+		if !tunnel.ReadOnly || !slices.Equal(tunnel.CapDrop, []string{"ALL"}) || !slices.Contains(tunnel.SecurityOpt, "no-new-privileges:true") || tunnel.PidsLimit == 0 || tunnel.Cpus == 0 {
 			t.Errorf("%s is not locked down: %s", name, raw)
 		}
 	}
