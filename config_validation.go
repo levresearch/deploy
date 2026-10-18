@@ -49,6 +49,7 @@ func (resolved ResolvedProject) Validate() error {
 	for _, name := range slices.Sorted(maps.Keys(resolved.Release)) {
 		problems = append(problems, validateService(name, resolved.Release[name], resolved)...)
 	}
+	problems = append(problems, validatePrivateNetworks(resolved)...)
 	if resolved.Version == 2 {
 		problems = append(problems, resolved.validateTopology())
 	}

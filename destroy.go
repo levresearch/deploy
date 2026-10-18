@@ -44,6 +44,7 @@ type DestroyPlan struct {
 	Releases        []string
 	SharedProject   string
 	Network         string
+	PrivateNetworks []string
 	Volumes         []string
 	RemoveVolumes   bool
 	KeptDirectories []string
@@ -76,14 +77,15 @@ func PlanDestroy(
 	slices.Sort(releases)
 
 	plan := DestroyPlan{
-		ProjectName:   resolved.Name,
-		ProjectID:     resolved.RuntimeID(),
-		Root:          root,
-		Releases:      releases,
-		SharedProject: SharedProjectName(resolved.RuntimeID()),
-		Network:       NetworkName(resolved.RuntimeID()),
-		Volumes:       VolumesFor(resolved),
-		RemoveVolumes: removeVolumes,
+		ProjectName:     resolved.Name,
+		ProjectID:       resolved.RuntimeID(),
+		Root:            root,
+		Releases:        releases,
+		SharedProject:   SharedProjectName(resolved.RuntimeID()),
+		Network:         NetworkName(resolved.RuntimeID()),
+		PrivateNetworks: PrivateNetworksFor(resolved),
+		Volumes:         VolumesFor(resolved),
+		RemoveVolumes:   removeVolumes,
 	}
 	if !removeVolumes {
 		plan.KeptDirectories = []string{layout.EnvDirectory(), path.Join(root, "volumes")}
@@ -102,6 +104,9 @@ func (plan DestroyPlan) Describe(out io.Writer) {
 	}
 	fmt.Fprintf(out, "  removing   images matching deploy-%s/*\n", plan.ProjectID)
 	fmt.Fprintf(out, "  removing   network %s\n", plan.Network)
+	for _, network := range plan.PrivateNetworks {
+		fmt.Fprintf(out, "  removing   network %s\n", network)
+	}
 	fmt.Fprintf(out, "  removing   %s/releases and %s/shared\n", plan.Root, plan.Root)
 
 	if plan.RemoveVolumes {
@@ -269,8 +274,10 @@ func ExecuteDestroy(runner Runner, layout Layout, plan DestroyPlan) error {
 
 	removeProjectImages(runner, plan.ProjectID)
 
-	if _, err := runner.Run([]string{"docker", "network", "rm", plan.Network}); err == nil {
-		fmt.Printf("  removed network %s\n", plan.Network)
+	for _, network := range append([]string{plan.Network}, plan.PrivateNetworks...) {
+		if _, err := runner.Run([]string{"docker", "network", "rm", network}); err == nil {
+			fmt.Printf("  removed network %s\n", network)
+		}
 	}
 
 	// releases and shared go whatever happens, since both are rebuildable from

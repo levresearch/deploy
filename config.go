@@ -64,7 +64,12 @@ type Service struct {
 	Healthcheck json.RawMessage
 	// Enabled false leaves the service out of the resolved project, so an environment can drop one it inherits.
 	Enabled *bool
-	Extra   map[string]json.RawMessage
+	// Isolated puts the service on that private network and nowhere else.
+	Isolated string
+	// Joins adds private networks beside the project network, so the service
+	// can reach what is isolated there and still reach everything else.
+	Joins []string
+	Extra map[string]json.RawMessage
 }
 
 type Host struct {
@@ -259,6 +264,12 @@ func mergeService(base, override Service, version int) Service {
 	}
 	if override.Enabled != nil {
 		merged.Enabled = override.Enabled
+	}
+	if override.Isolated != "" {
+		merged.Isolated = override.Isolated
+	}
+	if override.Joins != nil {
+		merged.Joins = override.Joins
 	}
 
 	if len(override.Extra) > 0 {
