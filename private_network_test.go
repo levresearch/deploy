@@ -278,3 +278,56 @@ func TestAnIsolatedServiceIsUnreachableFromOutsideItsNetwork(t *testing.T) {
 		t.Fatalf("the isolated service reached the internet: %v %s", err, output)
 	}
 }
+
+// The compose keys that lock a container down are not deploy's own, so this
+// checks they still reach the container and hold there: the root filesystem
+// refuses writes, the tmpfs takes them, and the capabilities are gone.
+func TestHardeningKeysReachTheContainerAndHold(t *testing.T) {
+	dockerAvailable(t)
+	t.Parallel()
+	const id = "fb0000a2"
+	removeDeployment(t, id)
+	repository := newRepository(t)
+	destination := t.TempDir()
+
+	commitFile(t, repository, configFileName, `{"version": 2, "id": "`+id+`", "name": "hardened", "retention": 2,
+	  "destinations": {"main": "`+destination+`"},
+	  "services": {
+	    "locked": {`+sleeper+`, "destination": "main", "read_only": true, "tmpfs": ["/tmp"],
+	      "cap_drop": ["ALL"], "security_opt": ["no-new-privileges:true"], "pids_limit": 64, "mem_limit": "64m", "cpus": 0.5}
+	  }}`)
+	commit, err := ResolveCommit(repository, "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code, err := RunDeploy(DeployOptions{Context: repository}); code != exitOK || err != nil {
+		t.Fatalf("deploy: %d %v", code, err)
+	}
+
+	project := ServiceReleaseProject(id, "locked", commit)
+	run := func(script string) string {
+		output, _ := exec.Command("docker", "compose", "--project-name", project, "exec", "-T", "locked", "sh", "-c", script).CombinedOutput()
+		return strings.TrimSpace(string(output))
+	}
+	if got := run("touch /written 2>/dev/null && echo wrote || echo refused"); got != "refused" {
+		t.Errorf("the read only root took a write: %s", got)
+	}
+	if got := run("touch /tmp/written && echo wrote"); got != "wrote" {
+		t.Errorf("the tmpfs refused a write: %s", got)
+	}
+	if got := run("grep CapEff /proc/self/status"); !strings.HasSuffix(got, "0000000000000000") {
+		t.Errorf("capabilities survived cap_drop: %s", got)
+	}
+	if got := run("grep NoNewPrivs /proc/self/status"); !strings.HasSuffix(got, "1") {
+		t.Errorf("no-new-privileges is off: %s", got)
+	}
+
+	container := strings.TrimSpace(func() string {
+		output, _ := exec.Command("docker", "compose", "--project-name", project, "ps", "-q", "locked").Output()
+		return string(output)
+	}())
+	limits, err := exec.Command("docker", "inspect", "--format", "{{.HostConfig.PidsLimit}} {{.HostConfig.Memory}} {{.HostConfig.NanoCpus}}", container).Output()
+	if err != nil || strings.TrimSpace(string(limits)) != "64 67108864 500000000" {
+		t.Errorf("limits did not reach the container: %q %v", limits, err)
+	}
+}
