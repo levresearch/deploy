@@ -292,9 +292,8 @@ func sealedEnvFiles(resolved ResolvedProject) []string {
 	return names
 }
 
-// CheckSealed runs before a deploy touches anything: age is installed, the key
-// opens, and every env file the project needs has a sealed copy for this
-// environment. It catches the deploy that would otherwise succeed with whatever
+// CheckSealed runs before a deploy touches anything: the key opens and every env
+// file the project needs has a sealed copy for this environment. It catches the deploy that would otherwise succeed with whatever
 // stale file happens to sit on the destination.
 func (secrets Secrets) CheckSealed(repositoryPath string, resolved ResolvedProject) error {
 	var missing []string
