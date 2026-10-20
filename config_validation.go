@@ -43,6 +43,13 @@ func (resolved ResolvedProject) Validate() error {
 		))
 	}
 
+	if resolved.Secrets != nil && resolved.Version != 2 {
+		problems = append(problems, errors.New("secrets needs config version 2"))
+	}
+	if err := validateSecrets(resolved.Secrets); err != nil {
+		problems = append(problems, err)
+	}
+
 	for _, name := range slices.Sorted(maps.Keys(resolved.Services)) {
 		problems = append(problems, validateService(name, resolved.Services[name], resolved)...)
 	}

@@ -33,6 +33,7 @@ func init() {
 		"migrate":  runMigrate,
 		"releases": runReleases,
 		"env":      runEnv,
+		"secrets":  runSecrets,
 		"rollback": runRollback,
 		"resolve":  runResolve,
 		"adopt":    runAdopt,
@@ -258,8 +259,23 @@ func runResolve(args []string) int {
 }
 
 func runEnv(args []string) int {
+	if len(args) >= 1 && args[0] == "diff" {
+		flags := newFlagSet("env diff")
+		options := DeployOptions{}
+		stringFlag(flags, &options.Context, "context", "C", "", "scope deploy to this path instead of the cwd")
+		stringFlag(flags, &options.Environment, "environment", "e", defaultEnvironmentName, "environment to resolve")
+		if keepGoing, exitCode := parseCommandFlags(flags, args[1:]); !keepGoing {
+			return exitCode
+		}
+		exitCode, err := RunEnvDiff(options)
+		if err != nil {
+			fatal("%v", err)
+		}
+
+		return exitCode
+	}
 	if len(args) < 2 || args[0] != "push" {
-		fatal("usage: deploy env push <file>")
+		fatal("usage: deploy env push <file|name> or deploy env diff")
 		return exitPreconditionNotMet
 	}
 
@@ -268,11 +284,43 @@ func runEnv(args []string) int {
 	stringFlag(flags, &options.Context, "context", "C", "", "scope deploy to this path instead of the cwd")
 	stringFlag(flags, &options.Destination, "destination", "D", "", "where the project gets deployed")
 	stringFlag(flags, &options.Environment, "environment", "e", defaultEnvironmentName, "environment to resolve")
+	allowPlaintext := false
+	flags.BoolVar(&allowPlaintext, "allow-plaintext", false, "push a plaintext file although the project seals its env files")
 	if keepGoing, exitCode := parseCommandFlags(flags, args[2:]); !keepGoing {
 		return exitCode
 	}
 
-	exitCode, err := RunEnvPush(options, args[1])
+	exitCode, err := RunEnvPush(options, args[1], allowPlaintext)
+	if err != nil {
+		fatal("%v", err)
+	}
+
+	return exitCode
+}
+
+// runSecrets is deploy secrets edit <name>, seal <file>, check and verify.
+func runSecrets(args []string) int {
+	if len(args) == 0 {
+		fatal("usage: deploy secrets edit <name> | seal <file> | check | verify")
+		return exitPreconditionNotMet
+	}
+	action, rest, name := args[0], args[1:], ""
+	if action == "edit" || action == "seal" {
+		if len(rest) == 0 || strings.HasPrefix(rest[0], "-") {
+			fatal("usage: deploy secrets %s <%s> [-e environment]", action, map[string]string{"edit": "name", "seal": "file"}[action])
+			return exitPreconditionNotMet
+		}
+		name, rest = rest[0], rest[1:]
+	}
+	flags := newFlagSet("secrets " + action)
+	options := DeployOptions{}
+	stringFlag(flags, &options.Context, "context", "C", "", "scope deploy to this path instead of the cwd")
+	stringFlag(flags, &options.Environment, "environment", "e", defaultEnvironmentName, "environment to resolve")
+	if keepGoing, exitCode := parseCommandFlags(flags, rest); !keepGoing {
+		return exitCode
+	}
+
+	exitCode, err := RunSecrets(options, action, name)
 	if err != nil {
 		fatal("%v", err)
 	}

@@ -167,7 +167,7 @@ func RunDestroy(options DeployOptions, removeVolumes bool, confirmation io.Reade
 	// the repository is found again rather than threaded out of openProject,
 	// because five other commands share that signature and none of them notify
 	if repositoryPath, err := FindRepository(destroyStartPath(options)); err == nil {
-		if notifier, err = NewNotifier(repositoryPath, resolved.Notify); err != nil {
+		if notifier, err = NewProjectNotifier(repositoryPath, resolved); err != nil {
 			return exitPreconditionNotMet, err
 		}
 	}

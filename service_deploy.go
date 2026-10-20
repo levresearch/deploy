@@ -151,6 +151,13 @@ func RunServiceDeploy(options DeployOptions, repositoryPath string) (exitCode in
 	if err != nil {
 		return exitPreconditionNotMet, err
 	}
+	// before anything reaches a destination: a sealed project deploys only from a
+	// machine that can open every env file it needs
+	if resolved.Secrets != nil {
+		if err := resolved.Secrets.CheckSealed(repositoryPath, resolved); err != nil {
+			return exitPreconditionNotMet, err
+		}
+	}
 
 	var notifier *Notifier
 	var announced bool
@@ -166,7 +173,7 @@ func RunServiceDeploy(options DeployOptions, repositoryPath string) (exitCode in
 			notifier.SendStage(stageCancelled, resolved.Name, affected, versions)
 		}
 	}()
-	notifier, err = NewNotifier(repositoryPath, resolved.Notify)
+	notifier, err = NewProjectNotifier(repositoryPath, resolved)
 	if err != nil {
 		return exitPreconditionNotMet, err
 	}

@@ -123,7 +123,7 @@ func RunDeploy(options DeployOptions) (exitCode int, err error) {
 
 	// resolved here rather than at the end, so a project that means to be told
 	// about its deploys finds out it cannot be before it waits on a build
-	notifier, err = NewNotifier(repositoryPath, resolved.Notify)
+	notifier, err = NewProjectNotifier(repositoryPath, resolved)
 	if err != nil {
 		return exitPreconditionNotMet, err
 	}
@@ -406,13 +406,13 @@ func RunReleases(options DeployOptions) (int, error) {
 // RunEnvPush places one env file on the destination. Separate from deploy because
 // a secret is not something to re-upload on every release, and because it is the
 // answer preflight points at when one is missing.
-func RunEnvPush(options DeployOptions, localPath string) (exitCode int, err error) {
+func RunEnvPush(options DeployOptions, localPath string, allowPlaintext bool) (exitCode int, err error) {
+	if repositoryPath, isService := isServiceConfig(options); isService {
+		return runServiceEnvPush(repositoryPath, options, localPath, allowPlaintext)
+	}
 	contents, err := os.ReadFile(localPath)
 	if err != nil {
 		return exitPreconditionNotMet, err
-	}
-	if repositoryPath, isService := isServiceConfig(options); isService {
-		return runServiceEnvPush(repositoryPath, options, localPath, contents)
 	}
 
 	startPath := options.Context

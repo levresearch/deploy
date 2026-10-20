@@ -343,6 +343,37 @@ if the webhook is down, your deploy still ships. a notification is a report abou
 
 fine for something small. it's a single stage build so every source change re-runs the whole install, and a cross arch build emulates the whole way through. if that starts hurting, write a real multi stage dockerfile and point `build.dockerfile` at it.
 
+### sealed secrets:
+
+env files are credentials, and keeping them only on the machine you deploy from means that machine is the one copy. version 2 projects can keep them in the repository instead, encrypted with [age](https://age-encryption.org):
+
+```jsonc
+"secrets": {
+  "directory": "secrets",                 // secrets/<environment>/<name>.age
+  "identity": "~/.config/myapp/age.key"   // the private key, on your machine, never in the repo
+  // "recipients": "secrets/recipients.txt" is the default: the public keys files are sealed to
+}
+```
+
+set it up once:
+
+```bash
+age-keygen -o ~/.config/myapp/age.key    # keep a copy in your password manager
+age-keygen -y ~/.config/myapp/age.key > secrets/recipients.txt
+deploy secrets seal ./app.env            # or deploy secrets edit app.env for a new one
+git add secrets && git commit
+```
+
+once a project has a secrets block, the sealed copy is the source of truth:
+
+- `deploy env push app.env` sends `secrets/<environment>/app.env.age`. age decrypts into a pipe deploy reads, so the plaintext never touches a disk. a plaintext file is refused unless you pass `--allow-plaintext`, and a sealed file for another environment is refused outright
+- `deploy` refuses to start, before it touches any server, unless age is installed, the key opens, and every env file the config needs has a sealed copy for the environment
+- the webhook comes from the sealed `secrets.env` and `.deploy/secrets.env` is not read. your shell still wins, so CI can set the variable instead
+- `deploy env diff` tells you whether a server's env files still match the repository. only sha256 digests cross the wire, and it exits 1 on any difference
+- `deploy secrets edit` is the one place plaintext lands in a file, because an editor needs one: a private directory on tmpfs, removed when the editor closes
+
+the key must be mode 600 and outside the repository, or deploy refuses it. `DEPLOY_AGE_IDENTITY` points at a different key for one command. age is a requirement only for projects that configure secrets.
+
 ### commands:
 
 | command | what it does |
@@ -357,6 +388,12 @@ fine for something small. it's a single stage build so every source change re-ru
 | `deploy shell web` | a shell inside the running container |
 | `deploy exec web -- npm run seed` | run one thing inside it |
 | `deploy env push .env.production` | put a secrets file on the server, mode 600 |
+| `deploy env push app.env` | with sealed secrets: push the sealed copy for this environment, opened in memory |
+| `deploy env diff` | with sealed secrets: compare every sealed env file with the copy on each server, by digest |
+| `deploy secrets edit app.env` | open a sealed env file in your editor and seal it again if it changed |
+| `deploy secrets seal ./app.env` | seal an existing plaintext file into the repository |
+| `deploy secrets check` | every sealed file opens, and this environment has every env file it needs |
+| `deploy secrets verify` | no key needed, for CI: the secrets directory holds only age ciphertext and public keys |
 | `deploy dwh <url>` | set the discord webhook for this project |
 | `deploy dwh` | say whether a webhook is set, without printing it |
 | `deploy rollback` | back to the previous release |
@@ -380,6 +417,7 @@ logs, shell and exec work out which stack the service is in themselves, you neve
 | `--allow-dirty` | deploy with uncommitted changes. it still builds the commit, not your working tree |
 | `--force-unlock` | clear abandoned legacy lock metadata after checking the old process has stopped; never bypass a live lock |
 | `--build-on-destination` | build on the server instead of on your machine |
+| `--allow-plaintext` | env push only: push a plaintext file although the project seals its env files |
 
 **exit codes**, if you're scripting it:
 

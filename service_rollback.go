@@ -123,7 +123,7 @@ func RunServiceRollback(options DeployOptions, repositoryPath, requested string,
 	if err != nil {
 		return exitPreconditionNotMet, err
 	}
-	notifier, err := NewNotifier(repositoryPath, resolved.Notify)
+	notifier, err := NewProjectNotifier(repositoryPath, resolved)
 	if err != nil {
 		return exitPreconditionNotMet, err
 	}
@@ -360,7 +360,7 @@ func runServiceDestroy(repositoryPath string, options DeployOptions, removeVolum
 		}
 		scope = map[string]Destination{options.Destination: only}
 	}
-	notifier, err := NewNotifier(repositoryPath, resolved.Notify)
+	notifier, err := NewProjectNotifier(repositoryPath, resolved)
 	if err != nil {
 		return exitPreconditionNotMet, err
 	}
