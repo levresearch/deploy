@@ -41,7 +41,8 @@ jobs:
         run: |
           # git grep searches tracked content, so it needs no file list and
           # cannot trip over something ignored or not checked out
-          if git grep -nP '[^\x00-\x7F]' -- . ; then
+          # vendor/ is third-party code kept as published (go assembly uses a middle dot)
+          if git grep -nP '[^\x00-\x7F]' -- . ':!vendor' ; then
             echo
             echo "the lines above contain characters that are not on a US keyboard."
             echo "use - for dashes, ' and \" for quotes, ... for an ellipsis, -> for an arrow."
