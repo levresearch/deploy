@@ -41,17 +41,13 @@ jobs:
         run: |
           # git grep searches tracked content, so it needs no file list and
           # cannot trip over something ignored or not checked out
-          if git grep -nP '[^\x00-\x7F]' -- . ; then
+          # vendor/ is third-party code kept as published (go assembly uses a middle dot)
+          if git grep -nP '[^\x00-\x7F]' -- . ':!vendor' ; then
             echo
             echo "the lines above contain characters that are not on a US keyboard."
             echo "use - for dashes, ' and \" for quotes, ... for an ellipsis, -> for an arrow."
             exit 1
           fi
-
-      # the sealed secrets tests skip without age, which would quietly stop
-      # covering them, so install it rather than let them pass by not running
-      - name: age for the sealed secrets tests
-        run: sudo apt-get update && sudo apt-get install -y age
 
       - name: unit tests
         run: go test -short ./...
@@ -84,7 +80,7 @@ jobs:
       - name: SSH test fixture
         run: |
           sudo apt-get update
-          sudo apt-get install -y openssh-server age
+          sudo apt-get install -y openssh-server
           sudo mkdir -p /run/sshd
 
       # -v streams each test as it finishes; without it this step prints nothing

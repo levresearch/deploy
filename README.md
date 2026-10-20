@@ -358,21 +358,21 @@ env files are credentials, and keeping them only on the machine you deploy from 
 set it up once:
 
 ```bash
-age-keygen -o ~/.config/myapp/age.key    # keep a copy in your password manager
-age-keygen -y ~/.config/myapp/age.key > secrets/recipients.txt
+deploy secrets keygen ~/.config/myapp/age.key   # prints the public key; keep a copy of the key somewhere safe
+echo age1... > secrets/recipients.txt             # the public key it printed
 deploy secrets seal ./app.env            # or deploy secrets edit app.env for a new one
 git add secrets && git commit
 ```
 
 once a project has a secrets block, the sealed copy is the source of truth:
 
-- `deploy env push app.env` sends `secrets/<environment>/app.env.age`. age decrypts into a pipe deploy reads, so the plaintext never touches a disk. a plaintext file is refused unless you pass `--allow-plaintext`, and a sealed file for another environment is refused outright
-- `deploy` refuses to start, before it touches any server, unless age is installed, the key opens, and every env file the config needs has a sealed copy for the environment
+- `deploy env push app.env` sends `secrets/<environment>/app.env.age`. deploy decrypts it in memory with the age library, so the plaintext never touches a disk. a plaintext file is refused unless you pass `--allow-plaintext`, and a sealed file for another environment is refused outright
+- `deploy` refuses to start, before it touches any server, unless the key opens and every env file the config needs has a sealed copy for the environment
 - the webhook comes from the sealed `secrets.env` and `.deploy/secrets.env` is not read. your shell still wins, so CI can set the variable instead
 - `deploy env diff` tells you whether a server's env files still match the repository. only sha256 digests cross the wire, and it exits 1 on any difference
 - `deploy secrets edit` is the one place plaintext lands in a file, because an editor needs one: a private directory on tmpfs, removed when the editor closes
 
-the key must be mode 600 and outside the repository, or deploy refuses it. `DEPLOY_AGE_IDENTITY` points at a different key for one command. age is a requirement only for projects that configure secrets.
+the key must be mode 600 and outside the repository, or deploy refuses it. `DEPLOY_AGE_IDENTITY` points at a different key for one command. age is built in (filippo.io/age, vendored), so nothing extra needs installing; keys from age-keygen work too.
 
 ### commands:
 
@@ -390,6 +390,7 @@ the key must be mode 600 and outside the repository, or deploy refuses it. `DEPL
 | `deploy env push .env.production` | put a secrets file on the server, mode 600 |
 | `deploy env push app.env` | with sealed secrets: push the sealed copy for this environment, opened in memory |
 | `deploy env diff` | with sealed secrets: compare every sealed env file with the copy on each server, by digest |
+| `deploy secrets keygen ~/.config/app/age.key` | write a new age key, mode 600, and print its public key |
 | `deploy secrets edit app.env` | open a sealed env file in your editor and seal it again if it changed |
 | `deploy secrets seal ./app.env` | seal an existing plaintext file into the repository |
 | `deploy secrets check` | every sealed file opens, and this environment has every env file it needs |

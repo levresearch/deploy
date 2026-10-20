@@ -2,7 +2,6 @@ package main
 
 import (
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -12,30 +11,46 @@ import (
 // so nothing here ever touches a real secret.
 func sealedRepository(t *testing.T) (string, Secrets) {
 	t.Helper()
-	if _, err := exec.LookPath("age"); err != nil {
-		t.Skip("age is not installed")
-	}
 	repository := t.TempDir()
 	identity := filepath.Join(t.TempDir(), "age.key")
-	if output, err := exec.Command("age-keygen", "-o", identity).CombinedOutput(); err != nil {
-		t.Fatalf("age-keygen: %v %s", err, output)
-	}
-	if err := os.Chmod(identity, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	recipient, err := exec.Command("age-keygen", "-y", identity).Output()
+	recipient, err := Keygen(identity)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("keygen: %v", err)
 	}
 	if err := os.MkdirAll(filepath.Join(repository, "secrets"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(repository, "secrets", "recipients.txt"), recipient, 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(repository, "secrets", "recipients.txt"), []byte(recipient+"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv(ageIdentityVariable, "")
 
 	return repository, Secrets{Directory: "secrets", Identity: identity}
+}
+
+func TestKeygenWritesAPrivateKeyAndNeverOverwritesOne(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "keys", "age.key")
+	recipient, err := Keygen(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(recipient, "age1") {
+		t.Fatalf("recipient = %q", recipient)
+	}
+	info, err := os.Stat(path)
+	if err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("key mode: %v %v", info, err)
+	}
+	raw, _ := os.ReadFile(path)
+	if !strings.Contains(string(raw), "AGE-SECRET-KEY-1") || !strings.Contains(string(raw), "# public key: "+recipient) {
+		t.Fatal("the key file is not in the age format")
+	}
+	if _, err := Keygen(path); err == nil || !strings.Contains(err.Error(), "never overwrites") {
+		t.Fatalf("an existing key was overwritten: %v", err)
+	}
+	if after, _ := os.ReadFile(path); string(after) != string(raw) {
+		t.Fatal("the key changed")
+	}
 }
 
 func seal(t *testing.T, repository string, secrets Secrets, environment, name, contents string) {
