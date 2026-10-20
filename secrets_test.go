@@ -257,6 +257,19 @@ func TestSealedProjectsReadTheWebhookFromTheSealedSecretsFile(t *testing.T) {
 	if notifier, err := NewProjectNotifier(repository, resolved); err != nil || notifier.webhookURL != "https://discord.com/api/webhooks/shell" {
 		t.Fatalf("the shell did not win: %v", err)
 	}
+	t.Setenv("DEPLOY_TEST_WEBHOOK", "")
+
+	// notify is project wide: staging without its own secrets.env uses production's
+	staging := resolved
+	staging.Environment = "staging"
+	if notifier, err := NewProjectNotifier(repository, staging); err != nil || notifier.webhookURL != "https://discord.com/api/webhooks/sealed" {
+		t.Fatalf("staging did not fall back to the default environment's webhook: %v", err)
+	}
+	// and one with its own uses its own
+	seal(t, repository, secrets, "staging", secretsFileName, "DEPLOY_TEST_WEBHOOK=https://discord.com/api/webhooks/staging\n")
+	if notifier, err := NewProjectNotifier(repository, staging); err != nil || notifier.webhookURL != "https://discord.com/api/webhooks/staging" {
+		t.Fatalf("staging's own webhook was not used: %v", err)
+	}
 }
 
 func TestRemoteDigestsReadsEveryFileInOneCall(t *testing.T) {

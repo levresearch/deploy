@@ -108,7 +108,9 @@ func NewNotifier(repositoryPath string, notify *Notify) (*Notifier, error) {
 // NewProjectNotifier is NewNotifier for a resolved project, which knows whether
 // its secrets are sealed. A sealed project reads the webhook from its sealed
 // secrets.env, and the plaintext file is not consulted: the sealed copy is the
-// one source of truth.
+// one source of truth. The notify block belongs to the whole project, so an
+// environment without its own secrets.env uses the default environment's,
+// the way one plaintext secrets file served every environment before.
 func NewProjectNotifier(repositoryPath string, resolved ResolvedProject) (*Notifier, error) {
 	if resolved.Secrets == nil {
 		return newNotifier(repositoryPath, resolved.Notify, nil)
@@ -116,7 +118,13 @@ func NewProjectNotifier(repositoryPath string, resolved ResolvedProject) (*Notif
 	secrets := *resolved.Secrets
 
 	return newNotifier(repositoryPath, resolved.Notify, func(name string) (string, error) {
-		return secrets.sealedValue(repositoryPath, resolved.Environment, secretsFileName, name)
+		environment := resolved.Environment
+		own := secrets.SealedPath(repositoryPath, environment, secretsFileName)
+		if _, err := os.Stat(own); errors.Is(err, fs.ErrNotExist) {
+			environment = defaultEnvironmentName
+		}
+
+		return secrets.sealedValue(repositoryPath, environment, secretsFileName, name)
 	})
 }
 
