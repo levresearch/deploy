@@ -114,7 +114,7 @@ func RunRollback(options DeployOptions, requested string, only ...string) (exitC
 	_, stateless := SplitServices(resolved.Services)
 	affected = AffectedNames(stateless)
 
-	notifier, err = NewNotifier(repositoryPath, resolved.Notify)
+	notifier, err = NewProjectNotifier(repositoryPath, resolved)
 	if err != nil {
 		return exitPreconditionNotMet, err
 	}

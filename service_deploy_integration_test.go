@@ -297,7 +297,7 @@ func TestTheEverydayCommandsFollowEachServicesRelease(t *testing.T) {
 	}
 	secret := filepath.Join(t.TempDir(), "app.env")
 	writeFile(t, filepath.Dir(secret), "app.env", "GREETING=hello from the env file\n")
-	if code, err := RunEnvPush(options, secret); code != exitOK || err != nil {
+	if code, err := RunEnvPush(options, secret, false); code != exitOK || err != nil {
 		t.Fatalf("env push: %d %v", code, err)
 	}
 	if state := recordedState(t, destination, id); state.Generation != 1 || len(state.Services) != 0 {
@@ -306,7 +306,7 @@ func TestTheEverydayCommandsFollowEachServicesRelease(t *testing.T) {
 	if _, err := os.Stat(operationFile(NewLayout(destination, id))); !os.IsNotExist(err) {
 		t.Fatal("env push left its operation recorded")
 	}
-	if _, err := RunEnvPush(DeployOptions{Context: repository, Destination: destination}, secret); err == nil {
+	if _, err := RunEnvPush(DeployOptions{Context: repository, Destination: destination}, secret, false); err == nil {
 		t.Fatal("a destination flag was accepted for version 2 env push")
 	}
 
@@ -498,5 +498,85 @@ func TestDestroyRemovesOneEnvironmentsServicesAndNothingElse(t *testing.T) {
 	}
 	if code, err := RunDeploy(production); code != exitOK || err != nil {
 		t.Fatalf("deploying again after destroy: %d %v", code, err)
+	}
+}
+
+func TestASealedProjectDeploysAndPushesOnlyFromItsSealedCopies(t *testing.T) {
+	dockerAvailable(t)
+	scratch, secrets := sealedRepository(t)
+	const id = "fb0000e7"
+	removeDeployment(t, id)
+	repository := newRepository(t)
+	destination := t.TempDir()
+	recipients, err := os.ReadFile(filepath.Join(scratch, "secrets", "recipients.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	commitFile(t, repository, "secrets/recipients.txt", string(recipients))
+	sealedConfig := func(env string) string {
+		return `{"version": 2, "id": "` + id + `", "name": "sealed",
+		  "destinations": {"main": "` + destination + `"},
+		  "secrets": {"directory": "secrets", "identity": "` + secrets.Identity + `"},
+		  "services": {"app": {` + sleeper + `, "destination": "main", "env": [` + env + `]}}}`
+	}
+	options := DeployOptions{Context: repository}
+
+	commitFile(t, repository, configFileName, sealedConfig(`"app.env", "other.env"`))
+	if code, err := RunDeploy(options); code != exitPreconditionNotMet || err == nil || !strings.Contains(err.Error(), "app.env, other.env has no sealed copy") {
+		t.Fatalf("a deploy without sealed copies started: %d %v", code, err)
+	}
+
+	commitFile(t, repository, configFileName, sealedConfig(`"app.env"`))
+	if _, err := secrets.Seal(repository, secrets.SealedPath(repository, "production", "app.env"), []byte("GREETING=sealed\n")); err != nil {
+		t.Fatal(err)
+	}
+	sealed, err := os.ReadFile(secrets.SealedPath(repository, "production", "app.env"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	commitFile(t, repository, "secrets/production/app.env.age", string(sealed))
+	// sealed, so the deploy gets as far as the destination, which has no copy yet
+	if code, err := RunDeploy(options); code != exitPreconditionNotMet || err == nil || !strings.Contains(err.Error(), "missing app.env") {
+		t.Fatalf("a sealed deploy did not reach the destination check: %d %v", code, err)
+	}
+
+	plaintext := filepath.Join(t.TempDir(), "app.env")
+	writeFile(t, filepath.Dir(plaintext), "app.env", "GREETING=plaintext\n")
+	if _, err := RunEnvPush(options, plaintext, false); err == nil || !strings.Contains(err.Error(), "--allow-plaintext") {
+		t.Fatalf("plaintext was pushed to a sealed project: %v", err)
+	}
+	if code, err := RunEnvPush(options, "app.env", false); code != exitOK || err != nil {
+		t.Fatalf("sealed env push: %d %v", code, err)
+	}
+	live := filepath.Join(NewLayout(destination, id).EnvDirectory(), "app.env")
+	if got, err := os.ReadFile(live); err != nil || string(got) != "GREETING=sealed\n" {
+		t.Fatalf("the destination got %q %v", got, err)
+	}
+
+	diff := captureStdout(t, func() {
+		if code, err := RunEnvDiff(options); code != exitOK || err != nil {
+			t.Fatalf("env diff on a matching destination: %d %v", code, err)
+		}
+	})
+	if !strings.Contains(diff, "app.env") || !strings.Contains(diff, "same") {
+		t.Fatalf("env diff output:\n%s", diff)
+	}
+	if err := os.WriteFile(live, []byte("GREETING=edited on the server\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	diff = captureStdout(t, func() {
+		if code, err := RunEnvDiff(options); code != exitDeployFailed || err == nil {
+			t.Fatalf("drift was not reported: %d %v", code, err)
+		}
+	})
+	if !strings.Contains(diff, "differs") {
+		t.Fatalf("env diff output:\n%s", diff)
+	}
+	if code, err := RunEnvPush(options, "app.env", false); code != exitOK || err != nil {
+		t.Fatalf("re-pushing the sealed copy: %d %v", code, err)
+	}
+
+	if code, err := RunDeploy(options); code != exitOK || err != nil {
+		t.Fatalf("sealed deploy: %d %v", code, err)
 	}
 }

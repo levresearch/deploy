@@ -7,6 +7,7 @@ import (
 	"maps"
 	"os"
 	"path"
+	"path/filepath"
 	"slices"
 	"strings"
 )
@@ -299,7 +300,7 @@ func listedProject(runner Runner, destinationPath, id string) (name, environment
 // release tasks list it, and nowhere else, under the locks and one operation.
 // A destination that was never deployed is claimed per service here, the way
 // version 1 env push claims an environment.
-func runServiceEnvPush(repositoryPath string, options DeployOptions, localPath string, contents []byte) (exitCode int, err error) {
+func runServiceEnvPush(repositoryPath string, options DeployOptions, target string, allowPlaintext bool) (exitCode int, err error) {
 	if options.Destination != "" {
 		return exitPreconditionNotMet, errors.New("version 2 takes its destinations from the config; --destination applies to version 1")
 	}
@@ -310,7 +311,10 @@ func runServiceEnvPush(repositoryPath string, options DeployOptions, localPath s
 	if err != nil {
 		return exitPreconditionNotMet, err
 	}
-	file := path.Base(localPath)
+	file, contents, err := envPushContents(repositoryPath, resolved, target, allowPlaintext)
+	if err != nil {
+		return exitPreconditionNotMet, err
+	}
 	needing := envFileDestinations(resolved, file)
 	if len(needing) == 0 {
 		return exitPreconditionNotMet, fmt.Errorf("no service or release task in %s lists %s, so it has nowhere to go", resolved.Environment, file)
@@ -358,6 +362,50 @@ func runServiceEnvPush(repositoryPath string, options DeployOptions, localPath s
 	}
 
 	return exitOK, nil
+}
+
+// envPushContents decides what an env push sends. A project that seals its env
+// files pushes the sealed copy for the environment being pushed, opened in
+// memory; a plaintext file is refused unless asked for, since it is exactly the
+// copy that drifts from the one in the repository. Without secrets configured
+// the file is read as it always was.
+func envPushContents(repositoryPath string, resolved ResolvedProject, target string, allowPlaintext bool) (string, []byte, error) {
+	secrets := resolved.Secrets
+	if sealedFile, isSealed := strings.CutSuffix(path.Base(target), sealedSuffix); isSealed {
+		if secrets == nil {
+			return "", nil, errors.New("this project configures no secrets, so deploy has no age key to open a sealed file with")
+		}
+		absolute, err := filepath.Abs(target)
+		if err != nil {
+			return "", nil, err
+		}
+		if environment := filepath.Base(filepath.Dir(absolute)); environment != resolved.Environment {
+			return "", nil, fmt.Errorf("%s is sealed for %s, not %s; add -e %s", target, environment, resolved.Environment, environment)
+		}
+		contents, err := secrets.Decrypt(repositoryPath, absolute)
+
+		return sealedFile, contents, err
+	}
+	if secrets != nil && !strings.ContainsRune(target, '/') {
+		sealed := secrets.SealedPath(repositoryPath, resolved.Environment, target)
+		if _, err := os.Stat(sealed); err == nil {
+			contents, err := secrets.Decrypt(repositoryPath, sealed)
+
+			return target, contents, err
+		}
+		if !allowPlaintext {
+			return "", nil, fmt.Errorf("%s has no sealed copy for %s; seal it with deploy secrets edit %s -e %s", target, resolved.Environment, target, resolved.Environment)
+		}
+	}
+	if secrets != nil && !allowPlaintext {
+		return "", nil, fmt.Errorf(
+			"this project seals its env files, so %s is pushed from its sealed copy: deploy env push %s -e %s. pass --allow-plaintext to push this file anyway",
+			target, path.Base(target), resolved.Environment,
+		)
+	}
+	contents, err := os.ReadFile(target)
+
+	return path.Base(target), contents, err
 }
 
 // envFileDestinations names the destinations whose services or release tasks

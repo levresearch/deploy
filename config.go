@@ -38,6 +38,7 @@ type Project struct {
 	// project, not about the mood of whoever is deploying it today.
 	BuildOnDestination bool                   `json:"buildOnDestination,omitempty"`
 	Notify             *Notify                `json:"notify,omitempty"`
+	Secrets            *Secrets               `json:"secrets,omitempty"`
 	Services           map[string]Service     `json:"services"`
 	Release            map[string]Service     `json:"release,omitempty"`
 	Environments       map[string]Environment `json:"environments,omitempty"`
@@ -95,6 +96,7 @@ type ResolvedProject struct {
 	Retention          int                `json:"retention"`
 	BuildOnDestination bool               `json:"buildOnDestination,omitempty"`
 	Notify             *Notify            `json:"notify,omitempty"`
+	Secrets            *Secrets           `json:"secrets,omitempty"`
 	Environment        string             `json:"environment"`
 	Services           map[string]Service `json:"services"`
 	Release            map[string]Service `json:"release,omitempty"`
@@ -208,6 +210,7 @@ func (project Project) ResolveEnvironment(environmentName string) (ResolvedProje
 		Retention:          retention,
 		BuildOnDestination: project.BuildOnDestination,
 		Notify:             project.Notify,
+		Secrets:            project.Secrets,
 		Environment:        environmentName,
 		Services:           services,
 		Release:            release,

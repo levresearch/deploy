@@ -102,13 +102,51 @@ const secretsFileName = "secrets.env"
 // and is not. It runs before anything is built, so this costs a typo rather than
 // a deploy.
 func NewNotifier(repositoryPath string, notify *Notify) (*Notifier, error) {
+	return newNotifier(repositoryPath, notify, nil)
+}
+
+// NewProjectNotifier is NewNotifier for a resolved project, which knows whether
+// its secrets are sealed. A sealed project reads the webhook from its sealed
+// secrets.env, and the plaintext file is not consulted: the sealed copy is the
+// one source of truth. The notify block belongs to the whole project, so an
+// environment without its own secrets.env uses the default environment's,
+// the way one plaintext secrets file served every environment before.
+func NewProjectNotifier(repositoryPath string, resolved ResolvedProject) (*Notifier, error) {
+	if resolved.Secrets == nil {
+		return newNotifier(repositoryPath, resolved.Notify, nil)
+	}
+	secrets := *resolved.Secrets
+
+	return newNotifier(repositoryPath, resolved.Notify, func(name string) (string, error) {
+		environment := resolved.Environment
+		own := secrets.SealedPath(repositoryPath, environment, secretsFileName)
+		if _, err := os.Stat(own); errors.Is(err, fs.ErrNotExist) {
+			environment = defaultEnvironmentName
+		}
+
+		return secrets.sealedValue(repositoryPath, environment, secretsFileName, name)
+	})
+}
+
+func newNotifier(repositoryPath string, notify *Notify, sealed func(string) (string, error)) (*Notifier, error) {
 	if notify == nil || notify.DiscordWebhookFrom == "" {
-		warnAboutStrandedWebhook(repositoryPath)
+		if sealed == nil {
+			warnAboutStrandedWebhook(repositoryPath)
+		}
 
 		return nil, nil
 	}
 
-	webhookURL, err := lookupSecret(repositoryPath, notify.DiscordWebhookFrom)
+	var webhookURL string
+	var err error
+	// the shell still wins, so CI and one-off overrides need no special case
+	if value := strings.TrimSpace(os.Getenv(notify.DiscordWebhookFrom)); value != "" {
+		webhookURL = value
+	} else if sealed != nil {
+		webhookURL, err = sealed(notify.DiscordWebhookFrom)
+	} else {
+		webhookURL, err = lookupSecret(repositoryPath, notify.DiscordWebhookFrom)
+	}
 	if err != nil {
 		return nil, err
 	}

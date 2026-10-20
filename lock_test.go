@@ -120,7 +120,7 @@ func TestMutatingCommandsRespectLocksAndConfirmation(t *testing.T) {
 		t.Fatal(err)
 	}
 	secret := writeConfig(t, "test-only")
-	if _, err := RunEnvPush(options, secret); err == nil {
+	if _, err := RunEnvPush(options, secret, false); err == nil {
 		t.Fatal("env push bypassed active lock")
 	}
 	if _, err := RunRollback(options, ""); err == nil || !strings.Contains(err.Error(), "active lock") {

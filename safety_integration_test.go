@@ -64,7 +64,7 @@ func TestEnvironmentIsolationAndStatefulUpgrade(t *testing.T) {
 		options.Environment = environment
 		secret := filepath.Join(t.TempDir(), ".env.test")
 		writeFile(t, filepath.Dir(secret), ".env.test", "TEST_ENV="+environment+"\n")
-		if _, err := RunEnvPush(options, secret); err != nil {
+		if _, err := RunEnvPush(options, secret, false); err != nil {
 			t.Fatal(err)
 		}
 		safetyDeploy(t, options, runtimeID)
