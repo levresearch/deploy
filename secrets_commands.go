@@ -197,8 +197,6 @@ func editSecret(repositoryPath string, secrets Secrets, environment, name string
 			return exitDeployFailed, err
 		}
 		before, exists = contents, true
-	} else if err := requireAge(); err != nil {
-		return exitPreconditionNotMet, err
 	}
 
 	directory, err := os.MkdirTemp(privateScratch(), "deploy-secrets-")

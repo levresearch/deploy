@@ -1,20 +1,21 @@
 package main
 
 import (
-	"bufio"
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
-	"os/exec"
 	"path"
 	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
+
+	"filippo.io/age"
 )
 
 // Secrets keeps env files in the repository as age ciphertext, one file per
@@ -39,10 +40,7 @@ const (
 	sealedSizeLimit = 1 << 20
 )
 
-var (
-	sealedName   = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
-	ageRecipient = regexp.MustCompile(`^age1[02-9ac-hj-np-z]{58}$`)
-)
+var sealedName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
 
 func validateSecrets(secrets *Secrets) error {
 	if secrets == nil {
@@ -109,92 +107,124 @@ func (secrets Secrets) identityPath(repositoryPath string) (string, error) {
 	return identity, nil
 }
 
-// requireAge is the requirement made explicit: a project that seals its secrets
-// cannot be deployed from a machine that cannot open them.
-func requireAge() error {
-	if _, err := exec.LookPath("age"); err != nil {
-		return errors.New("this project keeps its env files sealed with age, and age is not installed here. install it (for example apt install age, brew install age, or xbps-install age) and try again")
-	}
-
-	return nil
-}
-
-// Decrypt opens a sealed file straight into memory: age writes the plaintext to
-// a pipe this process reads, so it never touches a disk.
-func (secrets Secrets) Decrypt(repositoryPath, sealed string) ([]byte, error) {
-	if err := requireAge(); err != nil {
-		return nil, err
-	}
-	identity, err := secrets.identityPath(repositoryPath)
+// identities parses the key file with the age library, so no age binary is
+// needed anywhere deploy runs. Its errors never echo key material.
+func (secrets Secrets) identities(repositoryPath string) ([]age.Identity, error) {
+	path, err := secrets.identityPath(repositoryPath)
 	if err != nil {
 		return nil, err
 	}
-	var plaintext, stderr bytes.Buffer
-	command := exec.Command("age", "--decrypt", "--identity", identity, sealed)
-	command.Stdout = &plaintext
-	command.Stderr = &stderr
-	if err := command.Run(); err != nil {
-		return nil, fmt.Errorf("could not open %s: %s", sealed, firstLine(stderr.Bytes()))
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
 	}
-	if plaintext.Len() > sealedSizeLimit {
+	defer file.Close()
+	identities, err := age.ParseIdentities(file)
+	if err != nil {
+		return nil, fmt.Errorf("%s is not an age key: %w", path, err)
+	}
+
+	return identities, nil
+}
+
+// Decrypt opens a sealed file into memory; the plaintext never touches a disk.
+func (secrets Secrets) Decrypt(repositoryPath, sealed string) ([]byte, error) {
+	identities, err := secrets.identities(repositoryPath)
+	if err != nil {
+		return nil, err
+	}
+	file, err := os.Open(sealed)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	plaintext, err := age.Decrypt(file, identities...)
+	if err != nil {
+		return nil, fmt.Errorf("could not open %s: %w", sealed, err)
+	}
+	contents, err := io.ReadAll(io.LimitReader(plaintext, sealedSizeLimit+1))
+	if err != nil {
+		return nil, fmt.Errorf("could not open %s: %w", sealed, err)
+	}
+	if len(contents) > sealedSizeLimit {
 		return nil, fmt.Errorf("%s opens to more than %d bytes, which is not an env file", sealed, sealedSizeLimit)
 	}
 
-	return plaintext.Bytes(), nil
+	return contents, nil
 }
 
 // Seal encrypts plaintext from memory to every recipient. A file whose content
 // has not changed is left alone, since age output differs on every run and a
 // rewrite would show up as a change in git for nothing.
 func (secrets Secrets) Seal(repositoryPath, sealed string, plaintext []byte) (bool, error) {
-	if err := requireAge(); err != nil {
-		return false, err
-	}
 	if current, err := secrets.Decrypt(repositoryPath, sealed); err == nil && bytes.Equal(current, plaintext) {
 		return false, nil
 	}
-	recipients := secrets.recipientsPath(repositoryPath)
-	if _, err := readRecipients(recipients); err != nil {
+	recipients, err := readRecipients(secrets.recipientsPath(repositoryPath))
+	if err != nil {
 		return false, err
 	}
 	if err := os.MkdirAll(filepath.Dir(sealed), 0o755); err != nil {
 		return false, err
 	}
+	var ciphertext bytes.Buffer
+	writer, err := age.Encrypt(&ciphertext, recipients...)
+	if err != nil {
+		return false, fmt.Errorf("could not seal %s: %w", sealed, err)
+	}
+	if _, err := writer.Write(plaintext); err != nil {
+		return false, fmt.Errorf("could not seal %s: %w", sealed, err)
+	}
+	if err := writer.Close(); err != nil {
+		return false, fmt.Errorf("could not seal %s: %w", sealed, err)
+	}
 	temporary := sealed + ".tmp"
-	var stderr bytes.Buffer
-	command := exec.Command("age", "--encrypt", "--recipients-file", recipients, "--output", temporary)
-	command.Stdin = bytes.NewReader(plaintext)
-	command.Stderr = &stderr
-	if err := command.Run(); err != nil {
-		_ = os.Remove(temporary)
-		return false, fmt.Errorf("could not seal %s: %s", sealed, firstLine(stderr.Bytes()))
+	if err := os.WriteFile(temporary, ciphertext.Bytes(), 0o644); err != nil {
+		return false, err
 	}
 
 	return true, os.Rename(temporary, sealed)
 }
 
-func readRecipients(file string) ([]string, error) {
-	raw, err := os.ReadFile(file)
+// Keygen writes a new private key, mode 600, and returns its public key, so a
+// project can be set up without the age tools installed. It never overwrites a
+// key, since losing one makes every file sealed to it unreadable.
+func Keygen(path string) (string, error) {
+	identity, err := age.GenerateX25519Identity()
+	if err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return "", err
+	}
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if errors.Is(err, fs.ErrExist) {
+		return "", fmt.Errorf("%s already exists; deploy never overwrites an age key", path)
+	}
+	if err != nil {
+		return "", err
+	}
+	recipient := identity.Recipient().String()
+	_, err = fmt.Fprintf(file, "# public key: %s\n%s\n", recipient, identity.String())
+	if closeErr := file.Close(); err == nil {
+		err = closeErr
+	}
+
+	return recipient, err
+}
+
+func readRecipients(file string) ([]age.Recipient, error) {
+	opened, err := os.Open(file)
 	if err != nil {
 		return nil, fmt.Errorf("reading the age recipients: %w", err)
 	}
-	var keys []string
-	scanner := bufio.NewScanner(bytes.NewReader(raw))
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		if !ageRecipient.MatchString(line) {
-			return nil, fmt.Errorf("%s holds something other than age public keys", file)
-		}
-		keys = append(keys, line)
-	}
-	if len(keys) == 0 {
-		return nil, fmt.Errorf("%s names no age recipient", file)
+	defer opened.Close()
+	recipients, err := age.ParseRecipients(opened)
+	if err != nil {
+		return nil, fmt.Errorf("%s holds something other than age public keys: %w", file, err)
 	}
 
-	return keys, nil
+	return recipients, nil
 }
 
 // VerifyTracked needs no key, so CI can run it: the secrets directory may hold
@@ -267,9 +297,6 @@ func sealedEnvFiles(resolved ResolvedProject) []string {
 // environment. It catches the deploy that would otherwise succeed with whatever
 // stale file happens to sit on the destination.
 func (secrets Secrets) CheckSealed(repositoryPath string, resolved ResolvedProject) error {
-	if err := requireAge(); err != nil {
-		return err
-	}
 	var missing []string
 	for _, name := range sealedEnvFiles(resolved) {
 		sealed := secrets.SealedPath(repositoryPath, resolved.Environment, name)

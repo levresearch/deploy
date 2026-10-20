@@ -298,11 +298,26 @@ func runEnv(args []string) int {
 	return exitCode
 }
 
-// runSecrets is deploy secrets edit <name>, seal <file>, check and verify.
+// runSecrets is deploy secrets keygen <path>, edit <name>, seal <file>, check and verify.
 func runSecrets(args []string) int {
 	if len(args) == 0 {
-		fatal("usage: deploy secrets edit <name> | seal <file> | check | verify")
+		fatal("usage: deploy secrets keygen <path> | edit <name> | seal <file> | check | verify")
 		return exitPreconditionNotMet
+	}
+	// keygen needs no project, so a key can exist before the config that names it
+	if args[0] == "keygen" {
+		if len(args) != 2 {
+			fatal("usage: deploy secrets keygen <path>")
+			return exitPreconditionNotMet
+		}
+		recipient, err := Keygen(args[1])
+		if err != nil {
+			fatal("%v", err)
+			return exitPreconditionNotMet
+		}
+		fmt.Printf("wrote %s, mode 600; keep a copy somewhere safe, since files sealed to it cannot be opened without it\npublic key: %s\nadd the public key to your recipients file\n", args[1], recipient)
+
+		return exitOK
 	}
 	action, rest, name := args[0], args[1:], ""
 	if action == "edit" || action == "seal" {

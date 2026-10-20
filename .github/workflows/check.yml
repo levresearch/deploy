@@ -48,11 +48,6 @@ jobs:
             exit 1
           fi
 
-      # the sealed secrets tests skip without age, which would quietly stop
-      # covering them, so install it rather than let them pass by not running
-      - name: age for the sealed secrets tests
-        run: sudo apt-get update && sudo apt-get install -y age
-
       - name: unit tests
         run: go test -short ./...
 
@@ -84,7 +79,7 @@ jobs:
       - name: SSH test fixture
         run: |
           sudo apt-get update
-          sudo apt-get install -y openssh-server age
+          sudo apt-get install -y openssh-server
           sudo mkdir -p /run/sshd
 
       # -v streams each test as it finishes; without it this step prints nothing
