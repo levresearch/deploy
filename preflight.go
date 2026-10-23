@@ -205,6 +205,9 @@ func checkEnvFiles(runner Runner, resolved ResolvedProject, layout Layout) error
 	for _, task := range resolved.Release {
 		collectProjectEnvFiles(task, wanted)
 	}
+	for _, external := range resolved.External {
+		collectProjectEnvFiles(external, wanted)
+	}
 	if len(wanted) == 0 {
 		return nil
 	}
@@ -274,6 +277,9 @@ func EnvFileArguments(resolved ResolvedProject, layout Layout) []string {
 	}
 	for _, task := range resolved.Release {
 		collectProjectEnvFiles(task, wanted)
+	}
+	for _, external := range resolved.External {
+		collectProjectEnvFiles(external, wanted)
 	}
 
 	var arguments []string

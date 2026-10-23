@@ -129,7 +129,7 @@ func pendingTasks(state ServiceState) error {
 	for _, name := range slices.Sorted(maps.Keys(state.Tasks)) {
 		runs := state.Tasks[name]
 		if last := runs[len(runs)-1]; last.Outcome == outcomeIndeterminate {
-			return fmt.Errorf("release task %s did not finish in operation %s; inspect what it did, then run deploy resolve %s", name, last.Operation, last.Operation)
+			return fmt.Errorf("%s did not finish in operation %s; inspect what it did, then run deploy resolve %s", name, last.Operation, last.Operation)
 		}
 	}
 
@@ -162,8 +162,10 @@ func RunServiceDeploy(options DeployOptions, repositoryPath string) (exitCode in
 	var notifier *Notifier
 	var announced bool
 	_, stateless := SplitServices(resolved.Services)
+	// what this deploy can change: stateless services and external ones
+	stateless = maps.Clone(stateless)
+	maps.Copy(stateless, resolved.External)
 	if selected != nil {
-		stateless = maps.Clone(stateless)
 		maps.DeleteFunc(stateless, func(name string, _ Service) bool { return !selected[name] })
 	}
 	affected := AffectedNames(stateless)
@@ -278,6 +280,7 @@ func RunServiceDeploy(options DeployOptions, repositoryPath string) (exitCode in
 		fmt.Printf("deploying %s/%s %s to %s (%s)\n", resolved.Name, resolved.Environment, ShortCommit(commit), run.destination, builder.Describe())
 	}
 
+	reused := map[string]map[string]string{}
 	for _, run := range runs {
 		releaseDirectory := run.layout.Release(commit)
 		if err := PlaceRelease(run.runner, repositoryPath, gitStorage, run.destination, commit, releaseDirectory); err != nil {
@@ -293,6 +296,7 @@ func RunServiceDeploy(options DeployOptions, repositoryPath string) (exitCode in
 				return exitDeployFailed, err
 			}
 		}
+		reused[run.name] = reuse
 		builders[run.name].SetReleaseDirectory(releaseDirectory)
 		if err := buildServices(builders[run.name], run.view, repositoryPath, commit, reuse); err != nil {
 			return exitDeployFailed, err
@@ -332,6 +336,7 @@ func RunServiceDeploy(options DeployOptions, repositoryPath string) (exitCode in
 		var previous []string
 		for _, run := range runs {
 			_, local := SplitServices(run.view.Services)
+			maps.Copy(local, run.view.External)
 			if commits := liveCommits(run.state, local); commits != "" && !slices.Contains(previous, commits) {
 				previous = append(previous, commits)
 			}
@@ -343,7 +348,10 @@ func RunServiceDeploy(options DeployOptions, repositoryPath string) (exitCode in
 
 	executors := map[string]*serviceExecutor{}
 	for _, run := range runs {
-		executor := &serviceExecutor{runner: run.runner, resolved: run.view, layout: run.layout, commit: commit, operation: operation.ID, live: map[string]string{}}
+		executor := &serviceExecutor{runner: run.runner, resolved: run.view, layout: run.layout, commit: commit, operation: operation.ID, live: map[string]string{}, unchanged: map[string]bool{}}
+		for name := range reused[run.name] {
+			executor.unchanged[name] = true
+		}
 		for service, record := range run.state.Services {
 			if record.Current != nil {
 				executor.live[service] = record.Current.Project
@@ -371,13 +379,18 @@ func RunServiceDeploy(options DeployOptions, repositoryPath string) (exitCode in
 
 	if err := runWaves(resolved, runs, executors, selected); err != nil {
 		discardAll()
+		err = withReleased(err, runs, executors, commit)
 		if writeErr := recordAll(); writeErr != nil {
 			return exitLiveButNeedsAHuman, fmt.Errorf("%w; recording what is live also failed: %v", err, writeErr)
+		}
+		if errors.Is(err, errExternalUnverified) {
+			return exitLiveButNeedsAHuman, err
 		}
 		return exitDeployFailed, err
 	}
 	if err := checkCrossHostPaths(resolved, runs, executors); err != nil {
 		discardAll()
+		err = withReleased(err, runs, executors, commit)
 		if writeErr := recordAll(); writeErr != nil {
 			return exitLiveButNeedsAHuman, fmt.Errorf("%w; recording what is live also failed: %v", err, writeErr)
 		}
@@ -422,7 +435,7 @@ func RunServiceDeploy(options DeployOptions, repositoryPath string) (exitCode in
 		}
 	}
 	if cutoverErr != nil {
-		return exitDeployFailed, cutoverErr
+		return exitDeployFailed, withReleased(cutoverErr, runs, executors, commit)
 	}
 	if announced {
 		notifier.SendStage(stageLive, resolved.Name, affected, versions)
@@ -432,6 +445,20 @@ func RunServiceDeploy(options DeployOptions, repositoryPath string) (exitCode in
 	}
 
 	return exitOK, nil
+}
+
+// withReleased says which external services a failed deploy had already put
+// out, since nothing that fails after them takes them back.
+func withReleased(err error, runs []*destinationRun, executors map[string]*serviceExecutor, commit string) error {
+	var released []string
+	for _, run := range runs {
+		released = append(released, executors[run.name].released...)
+	}
+	if len(released) == 0 {
+		return err
+	}
+
+	return fmt.Errorf("%w; external %s already released %s and stays there", err, strings.Join(released, ", "), ShortCommit(commit))
 }
 
 // runWaves runs release tasks and starts candidates wave by wave across every
@@ -456,6 +483,17 @@ func runWaves(resolved ResolvedProject, runs []*destinationRun, executors map[st
 			for _, name := range wave {
 				if _, task := run.view.Release[name]; task {
 					if err := executors[run.name].runTask(&run.state, name); err != nil {
+						return err
+					}
+				}
+			}
+		}
+		// an external is live the moment its command succeeds, so it goes after
+		// the wave's release tasks and before anything is started beside it
+		for _, run := range runs {
+			for _, name := range wave {
+				if _, external := run.view.External[name]; external {
+					if err := executors[run.name].runExternal(&run.state, name); err != nil {
 						return err
 					}
 				}
@@ -622,7 +660,7 @@ func recordWorkloads(ctx context.Context, resolved ResolvedProject, hosts []netw
 				continue
 			}
 			for name, record := range run.state.Services {
-				if record.Current != nil {
+				if record.Current != nil && !record.External {
 					live[name] = *record.Current
 				}
 			}
@@ -683,6 +721,11 @@ type serviceExecutor struct {
 	// live names each service's serving project before the deploy; a candidate
 	// with the same project is a redeploy of that commit and is never discarded
 	live map[string]string
+	// unchanged are external services --affected found nothing new for, and
+	// released the external services this deploy already put out, which no
+	// failure after them can take back
+	unchanged map[string]bool
+	released  []string
 }
 
 func (executor *serviceExecutor) composeFile(release ServiceRelease) string {
@@ -974,6 +1017,14 @@ func pruneServiceReleases(runner Runner, layout Layout, id string, state Service
 		}
 		if len(record.Paths) == 0 {
 			record.Paths = nil
+		}
+		for commit := range record.References {
+			if !slices.Contains(kept, commit) && (record.Current == nil || record.Current.Commit != commit) && (record.Previous == nil || record.Previous.Commit != commit) {
+				delete(record.References, commit)
+			}
+		}
+		if len(record.References) == 0 {
+			record.References = nil
 		}
 		state.Services[name] = record
 		for _, commit := range kept {

@@ -283,6 +283,9 @@ func sealedEnvFiles(resolved ResolvedProject) []string {
 	for _, task := range resolved.Release {
 		collectProjectEnvFiles(task, wanted)
 	}
+	for _, external := range resolved.External {
+		collectProjectEnvFiles(external, wanted)
+	}
 	names := make([]string, 0, len(wanted))
 	for name := range wanted {
 		names = append(names, name)

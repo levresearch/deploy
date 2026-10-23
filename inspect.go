@@ -25,6 +25,9 @@ func LocateService(
 ) (ServiceLocation, error) {
 	service, found := resolved.Services[serviceName]
 	if !found {
+		if _, isExternal := resolved.External[serviceName]; isExternal {
+			return ServiceLocation{}, fmt.Errorf("%q is external: its release runs to completion and what it put out runs somewhere else", serviceName)
+		}
 		if _, isTask := resolved.Release[serviceName]; isTask {
 			return ServiceLocation{}, fmt.Errorf(
 				"%q is a release task, which runs to completion and is gone. it is not something to attach to",

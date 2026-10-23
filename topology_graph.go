@@ -14,6 +14,7 @@ func topologyNodes(resolved ResolvedProject) map[string]Service {
 		nodes = map[string]Service{}
 	}
 	maps.Copy(nodes, resolved.Release)
+	maps.Copy(nodes, resolved.External)
 	return nodes
 }
 
@@ -53,10 +54,14 @@ func validateReadiness(resolved ResolvedProject) []error {
 	nodes := topologyNodes(resolved)
 	for _, name := range slices.Sorted(maps.Keys(nodes)) {
 		service := nodes[name]
-		if _, duplicate := resolved.Services[name]; duplicate {
-			if _, task := resolved.Release[name]; task {
-				problems = append(problems, fmt.Errorf("%s is both a service and a release task", name))
-			}
+		_, isService := resolved.Services[name]
+		_, isTask := resolved.Release[name]
+		_, isExternal := resolved.External[name]
+		if isService && isTask {
+			problems = append(problems, fmt.Errorf("%s is both a service and a release task", name))
+		}
+		if isExternal && (isService || isTask) {
+			problems = append(problems, fmt.Errorf("%s is external and also a service or release task", name))
 		}
 		for _, dependency := range slices.Sorted(maps.Keys(service.DependsOn)) {
 			condition := service.DependsOn[dependency]
@@ -65,14 +70,18 @@ func validateReadiness(resolved ResolvedProject) []error {
 				continue
 			}
 			_, task := resolved.Release[dependency]
+			_, external := resolved.External[dependency]
 			if dependency == name {
 				problems = append(problems, fmt.Errorf("%s depends on itself", name))
 			}
-			if condition == "completed" && !task {
-				problems = append(problems, fmt.Errorf("%s: completed requires a release task, not %s", name, dependency))
+			if condition == "completed" && !task && !external {
+				problems = append(problems, fmt.Errorf("%s: completed requires a release task or an external service, not %s", name, dependency))
 			}
 			if task && condition != "completed" {
 				problems = append(problems, fmt.Errorf("%s: release dependency %s requires completed", name, dependency))
+			}
+			if external && condition != "completed" {
+				problems = append(problems, fmt.Errorf("%s: external dependency %s requires completed", name, dependency))
 			}
 			if condition == "healthy" && !hasHealthcheck(provider) {
 				problems = append(problems, fmt.Errorf("%s: dependency %s needs an enabled healthcheck", name, dependency))

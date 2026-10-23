@@ -26,6 +26,8 @@ const (
 	outcomeUnknown       = "unknown"
 	outcomeCompleted     = "completed"
 	outcomeIndeterminate = "indeterminate"
+	// an external release that went out but never answered as verify expects
+	outcomeUnverified = "unverified"
 	// outcomeResolved is an indeterminate run that an operator inspected and
 	// settled with deploy resolve; whether it completed stays unknown
 	outcomeResolved = "resolved"
@@ -66,6 +68,10 @@ type ServiceRecord struct {
 	// Paths records, per retained release, what it needed from the managed
 	// network, so a rollback never brings back access the network revoked.
 	Paths map[string][]string `json:"paths,omitempty"`
+	// External marks a service whose release is a command; nothing of it runs
+	// here. References keeps what each retained release printed to name it.
+	External   bool              `json:"external,omitempty"`
+	References map[string]string `json:"references,omitempty"`
 }
 
 type ServiceRelease struct {
@@ -180,8 +186,21 @@ func (state ServiceState) validate() error {
 }
 
 func (record ServiceRecord) validate(project, name string) error {
-	if !slices.Contains([]string{outcomeLive, outcomeFailed, outcomeUnknown}, record.Outcome) {
+	if !slices.Contains([]string{outcomeLive, outcomeFailed, outcomeUnknown}, record.Outcome) && !(record.External && record.Outcome == outcomeUnverified) {
 		return fmt.Errorf("invalid outcome %q", record.Outcome)
+	}
+	if record.External && (record.Stateful || len(record.Paths) > 0) {
+		return errors.New("an external service is neither stateful nor on the managed network")
+	}
+	if !record.External && len(record.References) > 0 {
+		return errors.New("only an external service records references")
+	}
+	// a reference goes back into a rollback command, so an edited one that is
+	// not a single safe token is refused here rather than run
+	for _, commit := range slices.Sorted(maps.Keys(record.References)) {
+		if !commitPattern.MatchString(commit) || !validReference(record.References[commit]) {
+			return fmt.Errorf("invalid reference for release %q", commit)
+		}
 	}
 	for _, release := range []*ServiceRelease{record.Current, record.Previous} {
 		if release != nil && !validRecordedRelease(*release) {

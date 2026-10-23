@@ -41,6 +41,7 @@ type Project struct {
 	Secrets            *Secrets               `json:"secrets,omitempty"`
 	Services           map[string]Service     `json:"services"`
 	Release            map[string]Service     `json:"release,omitempty"`
+	External           map[string]Service     `json:"external,omitempty"`
 	Environments       map[string]Environment `json:"environments,omitempty"`
 }
 
@@ -48,6 +49,7 @@ type Environment struct {
 	Network  *ManagedNetwork    `json:"network,omitempty"`
 	Services map[string]Service `json:"services,omitempty"`
 	Release  map[string]Service `json:"release,omitempty"`
+	External map[string]Service `json:"external,omitempty"`
 }
 
 // Extra carries every key deploy does not own, so the compose renderer can hand
@@ -70,7 +72,24 @@ type Service struct {
 	// Joins adds private networks beside the project network, so the service
 	// can reach what is isolated there and still reach everything else.
 	Joins []string
-	Extra map[string]json.RawMessage
+	// the rest belong to external services, whose release is a command that
+	// puts the work somewhere deploy does not run it, like a hosting platform.
+	// run replaces the image's command, reference picks what to record from
+	// its output, verify is checked once it succeeds, rollback runs instead of
+	// run to go back, and timeout bounds one run.
+	Run       []string
+	Reference string
+	Verify    *Verify
+	Rollback  []string
+	Timeout   string
+	Extra     map[string]json.RawMessage
+}
+
+// Verify is what an external release must answer before deploy calls it live.
+type Verify struct {
+	URL     string `json:"url"`
+	Status  []int  `json:"status,omitempty"`
+	Timeout string `json:"timeout,omitempty"`
 }
 
 type Host struct {
@@ -100,6 +119,7 @@ type ResolvedProject struct {
 	Environment        string             `json:"environment"`
 	Services           map[string]Service `json:"services"`
 	Release            map[string]Service `json:"release,omitempty"`
+	External           map[string]Service `json:"external,omitempty"`
 }
 
 func (service Service) IsStateful() bool {
@@ -172,6 +192,10 @@ func (project Project) ResolveEnvironment(environmentName string) (ResolvedProje
 	if release == nil {
 		release = map[string]Service{}
 	}
+	external := maps.Clone(project.External)
+	if external == nil {
+		external = map[string]Service{}
+	}
 
 	if len(project.Environments) > 0 {
 		environment, found := project.Environments[environmentName]
@@ -190,9 +214,13 @@ func (project Project) ResolveEnvironment(environmentName string) (ResolvedProje
 		for name, override := range environment.Release {
 			release[name] = mergeService(release[name], override, project.Version)
 		}
+		for name, override := range environment.External {
+			external[name] = mergeService(external[name], override, project.Version)
+		}
 	}
 	dropDisabled(services)
 	dropDisabled(release)
+	dropDisabled(external)
 
 	retention := project.Retention
 	if retention == 0 {
@@ -214,6 +242,7 @@ func (project Project) ResolveEnvironment(environmentName string) (ResolvedProje
 		Environment:        environmentName,
 		Services:           services,
 		Release:            release,
+		External:           external,
 	}, nil
 }
 
@@ -273,6 +302,22 @@ func mergeService(base, override Service, version int) Service {
 	}
 	if override.Joins != nil {
 		merged.Joins = override.Joins
+	}
+	// an environment swaps a whole command, never part of one
+	if override.Run != nil {
+		merged.Run = override.Run
+	}
+	if override.Reference != "" {
+		merged.Reference = override.Reference
+	}
+	if override.Verify != nil {
+		merged.Verify = override.Verify
+	}
+	if override.Rollback != nil {
+		merged.Rollback = override.Rollback
+	}
+	if override.Timeout != "" {
+		merged.Timeout = override.Timeout
 	}
 
 	if len(override.Extra) > 0 {
