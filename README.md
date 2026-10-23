@@ -253,6 +253,43 @@ deploy passes compose keys it does not own straight through, so hardening a serv
 "user": "1000:1000"
 ```
 
+**external services**
+
+some of what you release does not run on your servers at all: a site on a hosting platform, a worker on someone's edge, a package on a registry. an external service is one whose release is a command. deploy builds its image like any other, runs it to completion on its destination, and keeps track of whether it worked (version 2 only):
+
+```jsonc
+"external": {
+  "site": {
+    "destination": "main",
+    "build": "site/Dockerfile.deploy",          // the cli and the source it deploys
+    "env": ["site-vercel.env"],                  // its token, sealed like any env file
+    "run": ["vercel", "deploy", "--prod", "--yes"],
+    "timeout": "20m",                            // 1m to 2h, default 30m
+    "reference": "^(https://\\S+\\.vercel\\.app)$",   // what to record from the output
+    "verify": { "url": "https://site.example/health", "status": [200], "timeout": "2m" },
+    "rollback": ["vercel", "promote", "{reference}", "--yes"]
+  }
+},
+"environments": {
+  "staging": { "external": { "site": { "run": ["vercel", "deploy", "--yes"] } } }
+}
+```
+
+| key | takes | what it does |
+| --- | --- | --- |
+| `run` | `["vercel", "deploy", "--prod"]` | the command, in place of the image's own. an environment swaps the whole thing |
+| `timeout` | `"20m"` | how long one run gets. a run that hits it, is killed, or loses its ssh connection is `indeterminate`, like an interrupted release task, and blocks the next deploy until `deploy resolve` |
+| `reference` | a regex | matched against every line the run printed; the last line that matches is recorded, its capture group if it has one. it shows in `status` and `releases`, and has to be one token with no whitespace |
+| `verify` | `url`, `status`, `timeout` | polled from the machine running deploy once the run succeeds, until it answers with one of `status` (default `[200]`, redirects are not followed). a release that never does is rolled back to the previous one when there is one, or recorded `unverified` and the deploy exits as needing a human |
+| `rollback` | `["vercel", "promote", "{reference}"]` | run instead of `run` to go back, with `{reference}` replaced by what the target release recorded. without it, rolling back runs the target release's own command again from its image |
+
+- it is recorded like a stateless service, with a current, previous and retained releases, and each run is recorded like a release task run, `indeterminate` before it starts and `completed` or `failed` after.
+- it runs in its readiness wave after the wave's release tasks and before its services start. it is live the moment its command succeeds, so a later failure in the same deploy does not take it back, and the error says so.
+- something that waits on it uses `"completed"`. it can wait on anything itself.
+- it cannot be stateful, hosted, publish ports or endpoints, declare connections or take a healthcheck, and `command` is `run`. `run`, `reference`, `verify`, `rollback` and `timeout` belong to external services only.
+- `--affected` skips one whose image is reused and whose config did not change. `--service site` deploys just it.
+- `logs`, `shell` and `exec` refuse it, since nothing of it keeps running. `destroy` removes its releases here and leaves what it put out wherever that is.
+
 **notify**
 
 ```jsonc
@@ -505,7 +542,7 @@ This is an observation of the current host, not a persistent ownership claim. Pr
 2. Places the release on each destination and builds only what runs there, for that destination's architecture. A project that only runs published images builds nothing and needs no Docker on the machine running deploy.
 3. Applies the managed network, the same reconciliation as `deploy network apply`, under the same locks and operation. It does nothing when no connection crosses hosts.
 4. Brings up each destination's shared stack with its stateful services and tunnels under their existing names.
-5. Walks the readiness waves from `dependsOn` across every destination, so a graph may go from one host to another and back. Release tasks in a wave run first, one at a time, on their own destination; each run is recorded as `indeterminate` before it starts and as `completed` or `failed` after. Stateless services in a wave start together on every host, each in its own compose project, and the wave waits until all of them are healthy. A stateless service that publishes a fixed port for another host cannot run beside its live release, so it is replaced in place: the live one stops, the candidate must become healthy, and the live one is started again if it does not. A failed task or an unhealthy candidate stops the deploy, removes every candidate it started, and leaves every other service on its previous release.
+5. Walks the readiness waves from `dependsOn` across every destination, so a graph may go from one host to another and back. Release tasks in a wave run first, one at a time, on their own destination; each run is recorded as `indeterminate` before it starts and as `completed` or `failed` after. Stateless services in a wave start together on every host, each in its own compose project, and the wave waits until all of them are healthy. A stateless service that publishes a fixed port for another host cannot run beside its live release, so it is replaced in place: the live one stops, the candidate must become healthy, and the live one is started again if it does not. External services in a wave run next, one at a time, recorded the same way; one that succeeds is live at once (see external services above). A failed task or an unhealthy candidate stops the deploy, removes every candidate it started, and leaves every other service on its previous release.
 6. Reaches each cross-host provider from each candidate consumer's project network before anything is switched. A partition or a firewall that blocks the path stops the deploy there.
 7. Switches each service on its own: the candidate already answers on the project network, the live container is stopped, a hosted service's public hostname is verified (the live one is started again if it does not answer), and the stopped container is removed. Its compose file stays for rollback. If one switch fails, the services already switched stay switched, the rest keep their previous releases, and each destination's state records exactly that.
 8. Removes a stateless service from a destination the config moved it away from, now that it is live where it moved to. Moving a stateful service is refused before anything changes, since its data would stay behind. A service dropped from the config keeps running and stays recorded until `deploy destroy` removes it.
@@ -520,7 +557,7 @@ A destination that holds a version 1 deployment is refused until it is adopted. 
 
 `--affected` compares each service with the commit it is actually running, so services that move independently are each judged against their own release, and a release task against its last completed run. `--force-unlock` is refused with version 2, and so is `--destination` except by `destroy`, which takes a destination name.
 
-`deploy rollback` returns every stateless service to its own previous release, or `--service api,worker` only those. `deploy rollback <commit>` moves each service that ran that commit, and with `--service` the named ones must have it. Each service is rolled back on the destination that records it, under the locks of every destination. The retained release is started from its compose file, whether its own project or a version 1 commit stack, must become healthy, and then takes over exactly as a deploy candidate does; one that will not start is removed and nothing serving is touched. A fixed-port service is rolled back in place, the way deploy replaces one. A release that needed a network path the current config no longer provides is refused: rolling back never touches the network, so it cannot bring revoked access back, and a deploy is the way forward. Stateful services and data are never rolled back. Rolling back again returns each service to where it was.
+`deploy rollback` returns every stateless service to its own previous release, or `--service api,worker` only those. `deploy rollback <commit>` moves each service that ran that commit, and with `--service` the named ones must have it. Each service is rolled back on the destination that records it, under the locks of every destination. The retained release is started from its compose file, whether its own project or a version 1 commit stack, must become healthy, and then takes over exactly as a deploy candidate does; one that will not start is removed and nothing serving is touched. A fixed-port service is rolled back in place, the way deploy replaces one. A release that needed a network path the current config no longer provides is refused: rolling back never touches the network, so it cannot bring revoked access back, and a deploy is the way forward. An external service is rolled back with its `rollback` command, or by running the target release again, and is verified like a release. Stateful services and data are never rolled back. Rolling back again returns each service to where it was.
 
 `deploy destroy` finds every compose project deploy created for this environment by name on the Docker engine, including candidates and task runs an interrupted deploy left behind, and never another environment's. It keeps the typed confirmation, re-plans under the lock and refuses if anything changed while you were confirming, and records the operation. It removes the projects, images, Docker network and release directories on every destination, then the managed network from each host that has one. Volumes and env files stay unless `--volumes` is given, and so does an empty ownership record, so the next deploy or destroy there knows whose they are. `deploy destroy -D <destination>` destroys one destination by its config name; its host keeps the managed network while the rest of the config still links it.
 

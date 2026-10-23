@@ -53,7 +53,7 @@ func privateNetworksOf(groups ...map[string]Service) []string {
 // private networks, which is what the shared stack needs before anything starts
 // and what destroy removes.
 func PrivateNetworksFor(resolved ResolvedProject) []string {
-	names := privateNetworksOf(resolved.Services, resolved.Release)
+	names := privateNetworksOf(resolved.Services, resolved.Release, resolved.External)
 	networks := make([]string, 0, len(names))
 	for _, name := range names {
 		networks = append(networks, PrivateNetworkName(resolved.RuntimeID(), name))
@@ -98,6 +98,7 @@ func validatePrivateNetworks(resolved ResolvedProject) []error {
 	all := map[string]Service{}
 	maps.Copy(all, resolved.Services)
 	maps.Copy(all, resolved.Release)
+	maps.Copy(all, resolved.External)
 
 	isolatedIn := map[string][]string{}
 	for _, name := range slices.Sorted(maps.Keys(all)) {

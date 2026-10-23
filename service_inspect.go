@@ -134,6 +134,9 @@ func locateRecordedService(resolved ResolvedProject, layout Layout, state Servic
 	if _, task := resolved.Release[name]; task {
 		return ServiceLocation{}, fmt.Errorf("%q is a release task, which runs to completion and is gone. it is not something to attach to", name)
 	}
+	if _, external := resolved.External[name]; external || state.Services[name].External {
+		return ServiceLocation{}, fmt.Errorf("%q is external: its release runs to completion and what it put out runs somewhere else", name)
+	}
 	record, recorded := state.Services[name]
 	if !recorded || record.Current == nil {
 		if _, configured := resolved.Services[name]; configured {
@@ -173,6 +176,18 @@ func runServiceStatus(runner Runner, resolved ResolvedProject, layout Layout, de
 		if record.Current == nil {
 			continue
 		}
+		previous := "-"
+		if record.Previous != nil {
+			previous = record.Previous.Commit
+		}
+		if record.External {
+			status := "external, " + record.Outcome
+			if reference := record.References[record.Current.Commit]; reference != "" {
+				status += " at " + reference
+			}
+			fmt.Printf("  %-12s %-9s %-9s %s\n", name, record.Current.Commit, previous, status)
+			continue
+		}
 		project := record.Current.Project
 		if statuses[project] == nil {
 			statuses[project] = map[string]ContainerStatus{}
@@ -186,21 +201,18 @@ func runServiceStatus(runner Runner, resolved ResolvedProject, layout Layout, de
 		if running, found := statuses[project][name]; found {
 			status = running.Status
 		}
-		previous := "-"
-		if record.Previous != nil {
-			previous = record.Previous.Commit
-		}
 		release := record.Current.Commit
 		if record.Stateful {
 			release = "shared"
 		}
 		note := ""
-		if _, configured := resolved.Services[name]; !configured {
+		_, configured := resolved.Services[name]
+		if _, external := resolved.External[name]; !configured && !external {
 			note = "  (no longer in the config)"
 		}
 		fmt.Printf("  %-12s %-9s %-9s %s%s\n", name, release, previous, status, note)
 	}
-	for _, name := range ServiceNames(resolved.Services) {
+	for _, name := range append(ServiceNames(resolved.Services), ServiceNames(resolved.External)...) {
 		if record, found := state.Services[name]; !found || record.Current == nil {
 			fmt.Printf("  %-12s %-9s %-9s %s\n", name, "-", "-", "not deployed yet")
 		}
@@ -240,7 +252,11 @@ func runServiceReleases(runner Runner, resolved ResolvedProject, layout Layout, 
 			}
 			continue
 		}
-		fmt.Printf("\n%s\n", name)
+		if record.External {
+			fmt.Printf("\n%s (external)\n", name)
+		} else {
+			fmt.Printf("\n%s\n", name)
+		}
 		for _, commit := range record.Releases {
 			marker := "  "
 			switch {
@@ -250,8 +266,11 @@ func runServiceReleases(runner Runner, resolved ResolvedProject, layout Layout, 
 				marker = "- "
 			}
 			note := ""
+			if reference := record.References[commit]; reference != "" {
+				note = "  " + reference
+			}
 			if !slices.Contains(onDisk, commit) {
-				note = "  (missing from disk)"
+				note += "  (missing from disk)"
 			}
 			fmt.Printf("%s%s%s\n", marker, commit, note)
 		}
@@ -259,7 +278,11 @@ func runServiceReleases(runner Runner, resolved ResolvedProject, layout Layout, 
 	for _, name := range slices.Sorted(maps.Keys(state.Tasks)) {
 		runs := state.Tasks[name]
 		last := runs[len(runs)-1]
-		fmt.Printf("\n%s (release task), last run %s: %s in operation %s\n", name, last.Commit, last.Outcome, last.Operation)
+		kind := "release task"
+		if state.Services[name].External {
+			kind = "external run"
+		}
+		fmt.Printf("\n%s (%s), last run %s: %s in operation %s\n", name, kind, last.Commit, last.Outcome, last.Operation)
 	}
 	fmt.Printf("\n* current, - previous, keeping %d per service\n", resolved.Retention)
 

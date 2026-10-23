@@ -130,7 +130,10 @@ func (resolved ResolvedProject) nodeDestination(name string) string {
 	if service, found := resolved.Services[name]; found {
 		return service.Destination
 	}
-	return resolved.Release[name].Destination
+	if task, found := resolved.Release[name]; found {
+		return task.Destination
+	}
+	return resolved.External[name].Destination
 }
 
 // Digest identifies the desired state, so an unchanged network is recognized

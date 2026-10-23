@@ -56,6 +56,20 @@ func (resolved ResolvedProject) Validate() error {
 	for _, name := range slices.Sorted(maps.Keys(resolved.Release)) {
 		problems = append(problems, validateService(name, resolved.Release[name], resolved)...)
 	}
+	if len(resolved.External) > 0 && resolved.Version != 2 {
+		problems = append(problems, errors.New("external services need config version 2"))
+	}
+	for _, name := range slices.Sorted(maps.Keys(resolved.External)) {
+		problems = append(problems, validateService(name, resolved.External[name], resolved)...)
+		problems = append(problems, validateExternal(name, resolved.External[name])...)
+	}
+	for _, group := range []map[string]Service{resolved.Services, resolved.Release} {
+		for _, name := range slices.Sorted(maps.Keys(group)) {
+			if key := externalKey(group[name]); key != "" {
+				problems = append(problems, fmt.Errorf("%s sets %s, which only an external service takes", name, key))
+			}
+		}
+	}
 	problems = append(problems, validatePrivateNetworks(resolved)...)
 	if resolved.Version == 2 {
 		problems = append(problems, resolved.validateTopology())
@@ -109,7 +123,8 @@ func validateService(name string, service Service, resolved ResolvedProject) []e
 		}
 		_, isService := resolved.Services[dependency]
 		_, isReleaseTask := resolved.Release[dependency]
-		if !isService && !isReleaseTask {
+		_, isExternal := resolved.External[dependency]
+		if !isService && !isReleaseTask && !isExternal {
 			problems = append(problems, fmt.Errorf(
 				"service %q depends on %q, which this environment does not define",
 				name, dependency,

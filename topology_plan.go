@@ -106,6 +106,9 @@ func planTopology(resolved ResolvedProject, commit string) (TopologyPlan, error)
 		if _, task := resolved.Release[name]; task {
 			kind, policy = "release", "run once per recorded operation; indeterminate outcomes require reconciliation"
 		}
+		if _, external := resolved.External[name]; external {
+			kind, policy = "external", "run to completion and record; verify when configured; indeterminate outcomes require reconciliation"
+		}
 		for _, endpoint := range service.Endpoints {
 			if endpoint.HostPort != 0 {
 				policy = "recreate private listener; downtime on replacement"

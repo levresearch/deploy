@@ -544,6 +544,7 @@ func buildableServices(resolved ResolvedProject) map[string]Service {
 	buildable := map[string]Service{}
 	maps.Copy(buildable, resolved.Services)
 	maps.Copy(buildable, resolved.Release)
+	maps.Copy(buildable, resolved.External)
 
 	return buildable
 }

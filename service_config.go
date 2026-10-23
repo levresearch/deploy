@@ -24,6 +24,11 @@ type serviceFields struct {
 	Enabled     *bool                 `json:"enabled,omitempty"`
 	Isolated    string                `json:"isolated,omitempty"`
 	Joins       []string              `json:"joins,omitempty"`
+	Run         []string              `json:"run,omitempty"`
+	Reference   string                `json:"reference,omitempty"`
+	Verify      *Verify               `json:"verify,omitempty"`
+	Rollback    []string              `json:"rollback,omitempty"`
+	Timeout     string                `json:"timeout,omitempty"`
 }
 
 func (service *Service) UnmarshalJSON(raw []byte) error {
@@ -75,6 +80,16 @@ func (service *Service) UnmarshalJSON(raw []byte) error {
 			err = json.Unmarshal(value, &service.Isolated)
 		case "joins":
 			err = json.Unmarshal(value, &service.Joins)
+		case "run":
+			err = json.Unmarshal(value, &service.Run)
+		case "reference":
+			err = json.Unmarshal(value, &service.Reference)
+		case "verify":
+			err = decodeOwned(value, &service.Verify)
+		case "rollback":
+			err = json.Unmarshal(value, &service.Rollback)
+		case "timeout":
+			err = json.Unmarshal(value, &service.Timeout)
 		default:
 			if service.Extra == nil {
 				service.Extra = map[string]json.RawMessage{}
@@ -105,6 +120,11 @@ func (service Service) MarshalJSON() ([]byte, error) {
 		Enabled:     service.Enabled,
 		Isolated:    service.Isolated,
 		Joins:       service.Joins,
+		Run:         service.Run,
+		Reference:   service.Reference,
+		Verify:      service.Verify,
+		Rollback:    service.Rollback,
+		Timeout:     service.Timeout,
 	})
 	if err != nil {
 		return nil, err

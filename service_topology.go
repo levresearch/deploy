@@ -18,7 +18,7 @@ func (resolved ResolvedProject) on(destination string) ResolvedProject {
 	whole := resolved.topology()
 	view := whole
 	view.whole = &whole
-	view.Services, view.Release = map[string]Service{}, map[string]Service{}
+	view.Services, view.Release, view.External = map[string]Service{}, map[string]Service{}, map[string]Service{}
 	for name, service := range whole.Services {
 		if service.Destination == destination {
 			view.Services[name] = service
@@ -27,6 +27,11 @@ func (resolved ResolvedProject) on(destination string) ResolvedProject {
 	for name, task := range whole.Release {
 		if task.Destination == destination {
 			view.Release[name] = task
+		}
+	}
+	for name, external := range whole.External {
+		if external.Destination == destination {
+			view.External[name] = external
 		}
 	}
 

@@ -212,7 +212,13 @@ func RunServiceRollback(options DeployOptions, repositoryPath, requested string,
 		}
 		executor := serviceExecutor{runner: run.runner, resolved: run.view, layout: run.layout}
 		for _, step := range plans[run.name] {
-			if err := executor.rollService(step); err != nil {
+			roll := func() error { return executor.rollService(step) }
+			if recorded := run.state.Services[step.name]; recorded.External {
+				roll = func() error {
+					return executor.rollExternal(step.name, step.target, recorded.References[step.target.Commit])
+				}
+			}
+			if err := roll(); err != nil {
 				failure = fmt.Errorf("%s: %w", step.name, err)
 				if len(runs) > 1 {
 					failure = fmt.Errorf("destination %s: %w", run.name, failure)
@@ -402,6 +408,11 @@ func runServiceDestroy(repositoryPath string, options DeployOptions, removeVolum
 	}
 	for _, host := range kept {
 		fmt.Printf("\n  keeping    managed network on %s, which the rest of the config still links\n", host)
+	}
+	// destroy removes what deploy keeps here; what an external put out lives
+	// wherever its command sent it
+	for _, name := range ServiceNames(resolved.External) {
+		fmt.Printf("\n  keeping    what external %s released; remove it where it runs\n", name)
 	}
 	if err := ConfirmDestroy(plans[slices.Sorted(maps.Keys(plans))[0]], confirmation, os.Stdout); err != nil {
 		return exitPreconditionNotMet, err
