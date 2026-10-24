@@ -48,6 +48,8 @@ func externalKey(service Service) string {
 		return "rollback"
 	case service.Timeout != "":
 		return "timeout"
+	case service.Domain != "":
+		return "domain"
 	}
 
 	return ""
@@ -104,9 +106,16 @@ func validateExternal(name string, service Service) []error {
 			refuse("verify: %v", err)
 		}
 	}
+	if service.Domain != "" && !domainPattern.MatchString(service.Domain) {
+		refuse("domain %q is not a lowercase hostname like go.example.com", service.Domain)
+	}
 
 	return problems
 }
+
+// domainPattern is a lowercase dns name with at least two labels, which is
+// what a person types to reach something, with no scheme, port or path.
+var domainPattern = regexp.MustCompile(`^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]([a-z0-9-]{0,61}[a-z0-9])?$`)
 
 func validArgv(argv []string) bool {
 	return len(argv) > 0 && !slices.Contains(argv, "")

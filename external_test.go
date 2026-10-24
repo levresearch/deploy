@@ -99,6 +99,11 @@ func TestExternalServicesAreHeldToWhatACommandCanBe(t *testing.T) {
 		"verify status":    {`"verify": {"url": "https://a.example", "status": [42]}`, "not an http status"},
 		"verify too long":  {`"verify": {"url": "https://a.example", "timeout": "2h"}`, "outside"},
 		"unknown verify":   {`"verify": {"url": "https://a.example", "retries": 3}`, "unknown field"},
+		"domain with path": {`"domain": "go.example.com/x"`, "not a lowercase hostname"},
+		"domain url":       {`"domain": "https://go.example.com"`, "not a lowercase hostname"},
+		"domain uppercase": {`"domain": "Go.Example.com"`, "not a lowercase hostname"},
+		"single label":     {`"domain": "localhost"`, "not a lowercase hostname"},
+		"domain":           {`"domain": "go.example.com"`, ""},
 		"waits on started": {`"dependsOn": {"api": "started"}`, ""},
 	}
 	for name, test := range cases {
@@ -135,6 +140,8 @@ func TestOnlyExternalsTakeTheirKeysAndOthersWaitOnThemCompleted(t *testing.T) {
 	for _, config := range []string{
 		`"services": {"api": {"destination": "main", "image": "busybox:latest", "run": ["true"]}}`,
 		`"services": {"api": {"destination": "main", "image": "busybox:latest"}}, "release": {"migrate": {"destination": "main", "image": "busybox:latest", "verify": {"url": "https://a.example"}}}`,
+		// a service is named by its host block, which also publishes it
+		`"services": {"api": {"destination": "main", "image": "busybox:latest", "domain": "api.example.com"}}`,
 	} {
 		resolved := resolveExternal(t, `{"version": 2, "id": "ab000001", "name": "x", "destinations": {"main": "/srv"}, `+config+`}`, defaultEnvironmentName)
 		if err := resolved.Validate(); err == nil || !strings.Contains(err.Error(), "only an external service takes") {
@@ -290,5 +297,33 @@ func TestVerifyWaitsForAnExpectedStatusAndFollowsNoRedirects(t *testing.T) {
 	err := verifyExternal(Verify{URL: server.URL + "/moved", Timeout: "1s"})
 	if err == nil || !strings.Contains(err.Error(), "status 302") {
 		t.Fatalf("a wrong status passed: %v", err)
+	}
+}
+
+// domain only names an external to people: environments can change it, and
+// setting it is not a change that needs a release
+func TestAnExternalDomainNamesItWithoutChangingItsRelease(t *testing.T) {
+	config := strings.Replace(externalProject, `"timeout": "20m"}`, `"timeout": "20m", "domain": "site.example"}`, 1)
+	config = strings.Replace(config, `"staging": {"external": {"site": {`, `"staging": {"external": {"site": {"domain": "staging.site.example", `, 1)
+	production := resolveExternal(t, config, "production")
+	if err := production.Validate(); err != nil {
+		t.Fatalf("a valid domain was refused: %v", err)
+	}
+	if got := production.External["site"].Domain; got != "site.example" {
+		t.Fatalf("domain = %q", got)
+	}
+	if got := resolveExternal(t, config, "staging").External["site"].Domain; got != "staging.site.example" {
+		t.Fatalf("staging domain = %q", got)
+	}
+	without := resolveExternal(t, externalProject, "production")
+	if nodeDigest(production.External["site"]) != nodeDigest(without.External["site"]) {
+		t.Fatal("setting a domain changed the release digest")
+	}
+	if got := AffectedNames(map[string]Service{"site": production.External["site"], "worker": {}}); strings.Join(got, ",") != "site.example,worker" {
+		t.Fatalf("affected = %v", got)
+	}
+	encoded, err := json.Marshal(production.External["site"])
+	if err != nil || !strings.Contains(string(encoded), `"domain":"site.example"`) {
+		t.Fatalf("domain did not survive encoding: %s %v", encoded, err)
 	}
 }

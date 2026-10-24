@@ -621,8 +621,9 @@ func (notifier *Notifier) SendStage(
 
 // AffectedNames is what to call the services in a message to users. Somebody
 // reading the channel knows the site by its hostname and has never heard of the
-// container behind it, so anything with a host block is named by its domain and
-// everything else falls back to the service name.
+// container behind it, so anything with a host block or an external with a
+// domain is named by that domain, and everything else falls back to the
+// service name.
 // Sorted by the label rather than by the service behind it, since a reader has
 // no idea that lecternmc.com is called web and would see the ordering as random.
 func AffectedNames(services map[string]Service) []string {
@@ -630,6 +631,11 @@ func AffectedNames(services map[string]Service) []string {
 	for name, service := range services {
 		if host := service.Host; host != nil && host.Domain != "" {
 			affected = append(affected, host.Domain)
+			continue
+		}
+		// an external has no host block, since nothing of it runs here
+		if service.Domain != "" {
+			affected = append(affected, service.Domain)
 			continue
 		}
 		affected = append(affected, name)

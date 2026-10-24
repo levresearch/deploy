@@ -51,7 +51,10 @@ func loadServiceConfig(repositoryPath, environmentName string) (ResolvedProject,
 
 // nodeDigest identifies one service's or task's configuration, so a recorded
 // release says what it was deployed with and not just from which commit.
+// nodeDigest leaves out domain, which only names a service to people, so
+// setting it does not count as a change that needs a release.
 func nodeDigest(service Service) string {
+	service.Domain = ""
 	encoded, _ := json.Marshal(service)
 	digest := sha256.Sum256(encoded)
 

@@ -284,11 +284,12 @@ some of what you release does not run on your servers at all: a site on a hostin
 | `reference` | a regex | matched against every line the run printed; the last line that matches is recorded, its capture group if it has one. it shows in `status` and `releases`, and has to be one token with no whitespace |
 | `verify` | `url`, `status`, `timeout` | polled from the machine running deploy once the run succeeds, until it answers with one of `status` (default `[200]`, redirects are not followed). a release that never does is rolled back to the previous one when there is one, or recorded `unverified` and the deploy exits as needing a human |
 | `rollback` | `["vercel", "promote", "{reference}"]` | run instead of `run` to go back, with `{reference}` replaced by what the target release recorded. without it, rolling back runs the target release's own command again from its image |
+| `domain` | `"go.example.com"` | where people reach what it put out. it only names the service: the discord message lists it under affected instead of the service name, and `status` shows it. it sets up no tunnel or networking, and changing it is not a change that needs a release |
 
 - it is recorded like a stateless service, with a current, previous and retained releases, and each run is recorded like a release task run, `indeterminate` before it starts and `completed` or `failed` after.
 - it runs in its readiness wave after the wave's release tasks and before its services start. it is live the moment its command succeeds, so a later failure in the same deploy does not take it back, and the error says so.
 - something that waits on it uses `"completed"`. it can wait on anything itself.
-- it cannot be stateful, hosted, publish ports or endpoints, declare connections or take a healthcheck, and `command` is `run`. `run`, `reference`, `verify`, `rollback` and `timeout` belong to external services only.
+- it cannot be stateful, hosted, publish ports or endpoints, declare connections or take a healthcheck, and `command` is `run`. `run`, `reference`, `verify`, `rollback`, `timeout` and `domain` belong to external services only; a service is named by its `host` block instead.
 - `--affected` skips one whose image is reused and whose config did not change. `--service site` deploys just it.
 - `logs`, `shell` and `exec` refuse it, since nothing of it keeps running. `destroy` removes its releases here and leaves what it put out wherever that is.
 

@@ -29,6 +29,7 @@ type serviceFields struct {
 	Verify      *Verify               `json:"verify,omitempty"`
 	Rollback    []string              `json:"rollback,omitempty"`
 	Timeout     string                `json:"timeout,omitempty"`
+	Domain      string                `json:"domain,omitempty"`
 }
 
 func (service *Service) UnmarshalJSON(raw []byte) error {
@@ -90,6 +91,8 @@ func (service *Service) UnmarshalJSON(raw []byte) error {
 			err = json.Unmarshal(value, &service.Rollback)
 		case "timeout":
 			err = json.Unmarshal(value, &service.Timeout)
+		case "domain":
+			err = json.Unmarshal(value, &service.Domain)
 		default:
 			if service.Extra == nil {
 				service.Extra = map[string]json.RawMessage{}
@@ -125,6 +128,7 @@ func (service Service) MarshalJSON() ([]byte, error) {
 		Verify:      service.Verify,
 		Rollback:    service.Rollback,
 		Timeout:     service.Timeout,
+		Domain:      service.Domain,
 	})
 	if err != nil {
 		return nil, err
