@@ -76,12 +76,14 @@ type Service struct {
 	// puts the work somewhere deploy does not run it, like a hosting platform.
 	// run replaces the image's command, reference picks what to record from
 	// its output, verify is checked once it succeeds, rollback runs instead of
-	// run to go back, and timeout bounds one run.
+	// run to go back, and timeout bounds one run. domain is where people reach
+	// what it put out, which is only ever used to name it to them.
 	Run       []string
 	Reference string
 	Verify    *Verify
 	Rollback  []string
 	Timeout   string
+	Domain    string
 	Extra     map[string]json.RawMessage
 }
 
@@ -315,6 +317,9 @@ func mergeService(base, override Service, version int) Service {
 	}
 	if override.Rollback != nil {
 		merged.Rollback = override.Rollback
+	}
+	if override.Domain != "" {
+		merged.Domain = override.Domain
 	}
 	if override.Timeout != "" {
 		merged.Timeout = override.Timeout

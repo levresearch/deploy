@@ -185,6 +185,9 @@ func runServiceStatus(runner Runner, resolved ResolvedProject, layout Layout, de
 			if reference := record.References[record.Current.Commit]; reference != "" {
 				status += " at " + reference
 			}
+			if domain := resolved.External[name].Domain; domain != "" {
+				status += ", serving " + domain
+			}
 			fmt.Printf("  %-12s %-9s %-9s %s\n", name, record.Current.Commit, previous, status)
 			continue
 		}
