@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"maps"
+	"os"
 	"path"
 	"slices"
 	"strconv"
@@ -14,12 +15,21 @@ import (
 // held lock, and one df is much cheaper than that cleanup.
 const freeSpaceFloorMB = 2048
 
+// composeContentDigest is the first compose release that decides whether a
+// container is stale by its image's content rather than its image id. buildkit
+// attaches a provenance attestation with a build time to every image, so under
+// the containerd image store every rebuild gets a new id, and an older compose
+// recreated containers in place when a deploy rebuilt something that had not
+// changed. compose 5.5.0, docker/compose #14011 and #14041.
+var composeContentDigest = [3]int{5, 5, 0}
+
 // DestinationFacts is what preflight learned about the machine that will run the
 // containers, and what later steps need in order to target it.
 type DestinationFacts struct {
-	Architecture string
-	DataRoot     string
-	FreeSpaceMB  int
+	Architecture   string
+	DataRoot       string
+	FreeSpaceMB    int
+	ComposeVersion string
 }
 
 // CheckLocalRequirements covers the machine deploy was invoked on. Docker is
@@ -115,8 +125,35 @@ func CheckDestination(runner Runner, resolved ResolvedProject, layout Layout) (D
 	if err := checkEnvFiles(runner, resolved, layout); err != nil {
 		return facts, err
 	}
+	if composeOlderThan(facts.ComposeVersion, composeContentDigest) {
+		fmt.Fprintf(os.Stderr,
+			"warning: %s runs docker compose %s, and compose before %d.%d.%d recreates a running container whenever a rebuild gives its image a new id, even when nothing in it changed. upgrade the docker compose plugin there\n",
+			host, facts.ComposeVersion, composeContentDigest[0], composeContentDigest[1], composeContentDigest[2],
+		)
+	}
 
 	return facts, nil
+}
+
+// composeOlderThan is false for a version it cannot read, so an odd version
+// string never produces a warning nobody can act on.
+func composeOlderThan(version string, minimum [3]int) bool {
+	parts := strings.SplitN(strings.TrimPrefix(version, "v"), ".", 3)
+	if len(parts) < 3 {
+		return false
+	}
+	var got [3]int
+	for index, part := range parts {
+		// a build suffix like 2.29.1-desktop.1 follows the digits
+		digits := part[:len(part)-len(strings.TrimLeft(part, "0123456789"))]
+		number, err := strconv.Atoi(digits)
+		if err != nil {
+			return false
+		}
+		got[index] = number
+	}
+
+	return slices.Compare(got[:], minimum[:]) < 0
 }
 
 // missingOn asks once for everything rather than paying a round trip per binary,
@@ -151,6 +188,9 @@ func readDestinationFacts(runner Runner) (DestinationFacts, error) {
 	}
 
 	facts := DestinationFacts{Architecture: strings.TrimSpace(string(architecture))}
+	if compose, err := runner.Run([]string{"docker", "compose", "version", "--short"}); err == nil {
+		facts.ComposeVersion = strings.TrimSpace(string(compose))
+	}
 
 	// the data root rather than the project directory, since that is where images
 	// and container layers land and where a Pi actually runs out of room
