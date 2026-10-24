@@ -89,6 +89,8 @@ type Notifier struct {
 	client     *http.Client
 	messageID  string
 	log        []string
+	// started is when the first stage went out, which is what took counts from
+	started time.Time
 }
 
 // secretsFileName holds credentials deploy itself needs, as opposed to the env
@@ -489,50 +491,77 @@ type StageVersions struct {
 	Incoming string
 }
 
-// versionLine points the arrow at whichever release is being ended up on, so a
-// deploy reads left to right and a revert reads right to left. Previous stays on
-// the left either way, so only the arrow has to be read to know the direction.
-func (versions StageVersions) versionLine(reverting bool) string {
-	if versions.Previous == "" || versions.Previous == versions.Incoming {
-		return versions.Incoming
-	}
+// versionBlock is a diff of the release: what is live once this stage lands on
+// a + line, and each release it replaces on a - line, so discord colours the
+// direction instead of an arrow having to be read. a revert lands on the earlier
+// release, so that one gets the +. several destinations can each be on their
+// own release, so each gets a line.
+func (versions StageVersions) versionBlock(reverting bool) string {
+	landing, leaving := splitVersions(versions.Incoming), splitVersions(versions.Previous)
 	if reverting {
-		return versions.Previous + " <- " + versions.Incoming
+		landing, leaving = leaving, landing
+	}
+	var lines []string
+	for _, version := range landing {
+		lines = append(lines, "+ "+version)
+	}
+	for _, version := range leaving {
+		if !slices.Contains(landing, version) {
+			lines = append(lines, "- "+version)
+		}
+	}
+	if len(lines) == 0 {
+		return ""
 	}
 
-	return versions.Previous + " -> " + versions.Incoming
+	return "```diff\n" + strings.Join(lines, "\n") + "\n```"
 }
 
-// clockFormat is local to whoever ran the deploy, which for a project with one
-// operator is the only clock anybody involved is reading. The seconds are there
-// because the stages land within a few of each other and a log where three lines
-// share a minute says nothing about the order.
-const clockFormat = "15:04:05"
+func splitVersions(joined string) []string {
+	var versions []string
+	for version := range strings.SplitSeq(joined, ",") {
+		if version = strings.TrimSpace(version); version != "" && !slices.Contains(versions, version) {
+			versions = append(versions, version)
+		}
+	}
+
+	return versions
+}
 
 // appendLine grows the log rather than replacing it, so the message ends up
-// being the whole story of the release instead of only its last moment.
+// being the whole story of the release instead of only its last moment. the
+// time is discord's timestamp markup, which each reader sees in their own
+// timezone. the seconds are there because the stages land within a few of each
+// other and a log where three lines share a minute says nothing about the order.
 func appendLine(log []string, stage DeployStage, at time.Time) []string {
 	line := stage.line()
 	if line == "" {
 		return log
 	}
 
-	return append(log, at.Format(clockFormat)+"  "+line)
+	return append(log, fmt.Sprintf("<t:%d:T>  %s", at.Unix(), line))
+}
+
+// ends is a stage that closes a message other stages came before, which is
+// where how long the whole thing took is worth saying. a rollback that lands is
+// its own one message, so it has nothing to count.
+func (stage DeployStage) ends() bool {
+	return stage == stageLive || stage == stageCancelled || stage == stageRollbackFailed
 }
 
 // StagePayload is built without touching the network, so the wording can be
 // tested without a webhook. The log is every line so far including this stage's,
 // because the description is rewritten in full on every edit.
 func StagePayload(
-	stage DeployStage, log []string, projectName string, affected []string, versions StageVersions,
+	stage DeployStage, log []string, projectName string, affected []string, versions StageVersions, took time.Duration,
 ) ([]byte, error) {
 	fields := []discordField{}
 
 	// cancelled and rolling back both end up on the earlier release, so they are
 	// the stages whose arrow points the other way
 	reverting := stage == stageCancelled || stage == stageRollingBack
-	if line := versions.versionLine(reverting); line != "" {
-		fields = append(fields, discordField{Name: "version", Value: truncate(line, discordFieldLimit), Inline: true})
+	if block := versions.versionBlock(reverting); block != "" {
+		fields = append(fields, discordField{Name: "version", Value: truncate(block, discordFieldLimit), Inline: true})
 	}
 	if len(affected) > 0 {
 		// a code block one name per line, because a comma separated run of
@@ -542,6 +571,10 @@ func StagePayload(
 			Value:  truncate("```\n"+strings.Join(affected, "\n")+"\n```", discordFieldLimit),
 			Inline: true,
 		})
+	}
+	// under a second rounds to nothing, and "0s" would only look broken
+	if took = took.Round(time.Second); took > 0 {
+		fields = append(fields, discordField{Name: "took", Value: took.String(), Inline: true})
 	}
 
 	embed := discordEmbed{
@@ -566,9 +599,17 @@ func (notifier *Notifier) SendStage(
 		return
 	}
 
-	notifier.log = appendLine(notifier.log, stage, time.Now())
+	now := time.Now()
+	if notifier.started.IsZero() {
+		notifier.started = now
+	}
+	notifier.log = appendLine(notifier.log, stage, now)
+	var took time.Duration
+	if stage.ends() {
+		took = now.Sub(notifier.started)
+	}
 
-	payload, err := StagePayload(stage, notifier.log, projectName, affected, versions)
+	payload, err := StagePayload(stage, notifier.log, projectName, affected, versions, took)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "warning: could not build the %q notification: %v\n", stage.title(projectName), err)
 

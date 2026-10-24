@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -391,26 +392,28 @@ func TestTheStageMessagesReadForSomebodyWhoDoesNotKnowWhatACommitIs(t *testing.T
 		wantColour int
 		wantVerion string
 	}{
-		{stageReady, "staging new deployment", "there is a new version being staged", 0x3498db, "abc1234 -> def5678"},
+		{stageReady, "staging new deployment", "there is a new version being staged", 0x3498db, "```diff\n+ def5678\n- abc1234\n```"},
 		{
 			stageSwitching, "switching over",
 			"switching over to the new version now, usually without any interruption",
-			0xf39c12, "abc1234 -> def5678",
+			0xf39c12, "```diff\n+ def5678\n- abc1234\n```",
 		},
-		{stageLive, "update live", "the new version is up and answering", 0x2ecc71, "abc1234 -> def5678"},
-		// the one stage that ends up back where it started, so the arrow turns
+		{stageLive, "update live", "the new version is up and answering", 0x2ecc71, "```diff\n+ def5678\n- abc1234\n```"},
+		// the one stage that ends up back where it started, so the earlier release
+		// is the one that gets the +
 		{
 			stageCancelled, "reverting changes",
 			"we are reverting changes while we fix some issues with the deployment",
-			0xe74c3c, "abc1234 <- def5678",
+			0xe74c3c, "```diff\n+ abc1234\n- def5678\n```",
 		},
 	}
 
 	for _, testCase := range cases {
 		t.Run(testCase.wantTitle, func(t *testing.T) {
-			log := appendLine(nil, testCase.stage, time.Date(2026, 8, 17, 14, 5, 9, 0, time.UTC))
+			at := time.Date(2026, 8, 17, 14, 5, 9, 0, time.UTC)
+			log := appendLine(nil, testCase.stage, at)
 
-			payload, err := StagePayload(testCase.stage, log, "lmc", []string{"lecternmc.com", "bot"}, versions)
+			payload, err := StagePayload(testCase.stage, log, "lmc", []string{"lecternmc.com", "bot"}, versions, 0)
 			if err != nil {
 				t.Fatalf("StagePayload: %v", err)
 			}
@@ -419,10 +422,11 @@ func TestTheStageMessagesReadForSomebodyWhoDoesNotKnowWhatACommitIs(t *testing.T
 			if title, _ := embed["title"].(string); title != testCase.wantTitle {
 				t.Errorf("title = %q, want %q", title, testCase.wantTitle)
 			}
-			// the clock is there because the stages land seconds apart and a log
-			// that does not say when says nothing about the order
+			// the time is there because the stages land seconds apart and a log
+			// that does not say when says nothing about the order, and it is
+			// discord's markup so each reader sees it in their own timezone
 			body, _ := embed["description"].(string)
-			if body != "14:05:09  "+testCase.wantLine {
+			if body != stamp(at)+testCase.wantLine {
 				t.Errorf("body = %q, want the line stamped with the time", body)
 			}
 			if colour, _ := embed["color"].(float64); int(colour) != testCase.wantColour {
@@ -450,7 +454,7 @@ func TestTheStageMessagesReadForSomebodyWhoDoesNotKnowWhatACommitIs(t *testing.T
 // The version and the affected list sit beside each other rather than stacked,
 // since both are short and the log underneath them is what needs the width.
 func TestTheVersionAndAffectedFieldsSitSideBySide(t *testing.T) {
-	payload, err := StagePayload(stageLive, nil, "lmc", []string{"lecternmc.com"}, StageVersions{Incoming: "def5678"})
+	payload, err := StagePayload(stageLive, nil, "lmc", []string{"lecternmc.com"}, StageVersions{Incoming: "def5678"}, 0)
 	if err != nil {
 		t.Fatalf("StagePayload: %v", err)
 	}
@@ -478,7 +482,7 @@ func TestTheLogKeepsEveryLineAndTheEmbedTracksTheLatestStage(t *testing.T) {
 		log = appendLine(log, stage, at.Add(time.Duration(offset*11)*time.Second))
 	}
 
-	payload, err := StagePayload(stageLive, log, "lmc", nil, StageVersions{Incoming: "def5678"})
+	payload, err := StagePayload(stageLive, log, "lmc", nil, StageVersions{Incoming: "def5678"}, 0)
 	if err != nil {
 		t.Fatalf("StagePayload: %v", err)
 	}
@@ -486,9 +490,9 @@ func TestTheLogKeepsEveryLineAndTheEmbedTracksTheLatestStage(t *testing.T) {
 	embed := decodeEmbed(t, payload)
 	body, _ := embed["description"].(string)
 
-	want := "14:05:09  there is a new version being staged\n" +
-		"14:05:20  switching over to the new version now, usually without any interruption\n" +
-		"14:05:31  the new version is up and answering"
+	want := stamp(at) + "there is a new version being staged\n" +
+		stamp(at.Add(11*time.Second)) + "switching over to the new version now, usually without any interruption\n" +
+		stamp(at.Add(22*time.Second)) + "the new version is up and answering"
 	if body != want {
 		t.Errorf("the log reads\n%s\n\nwant\n%s", body, want)
 	}
@@ -503,19 +507,84 @@ func TestTheLogKeepsEveryLineAndTheEmbedTracksTheLatestStage(t *testing.T) {
 	}
 }
 
-// A first deploy has nothing to move away from, so an arrow would be pointing
-// away from nothing.
+// a first deploy has nothing to move away from, so there is no - line
 func TestAFirstDeployNamesOneVersionRatherThanATransition(t *testing.T) {
 	fields := fieldsOf(t, decodeEmbed(t, mustStagePayload(t, stageLive, StageVersions{Incoming: "def5678"})))
-	if fields["version"] != "def5678" {
+	if fields["version"] != "```diff\n+ def5678\n```" {
 		t.Errorf("version = %q, want just the one release", fields["version"])
 	}
 
 	// and redeploying what is already current is not a transition either
 	same := fieldsOf(t, decodeEmbed(t, mustStagePayload(t, stageLive, StageVersions{Previous: "def5678", Incoming: "def5678"})))
-	if same["version"] != "def5678" {
+	if same["version"] != "```diff\n+ def5678\n```" {
 		t.Errorf("version = %q, want just the one release", same["version"])
 	}
+
+	// destinations on different releases each lose theirs on a line of its own
+	several := fieldsOf(t, decodeEmbed(t, mustStagePayload(t, stageLive, StageVersions{Previous: "abc1234, 0a1b2c3, def5678", Incoming: "def5678"})))
+	if several["version"] != "```diff\n+ def5678\n- abc1234\n- 0a1b2c3\n```" {
+		t.Errorf("version = %q, want one - line per release replaced", several["version"])
+	}
+}
+
+// took counts from the first message to the stage that closes it, and only a
+// closing stage says it
+func TestTheClosingStageSaysHowLongTheReleaseTook(t *testing.T) {
+	webhook := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(writer, `{"id": "1417"}`)
+	}))
+	defer webhook.Close()
+	var bodies [][]byte
+	recording := &http.Client{Transport: roundTripRecorder{next: webhook.Client().Transport, bodies: &bodies}}
+
+	notifier := &Notifier{webhookURL: webhook.URL, client: recording}
+	notifier.SendStage(stageReady, "shop", nil, StageVersions{Incoming: "def5678"})
+	notifier.started = notifier.started.Add(-102 * time.Second)
+	notifier.SendStage(stageLive, "shop", nil, StageVersions{Incoming: "def5678"})
+
+	if len(bodies) != 2 {
+		t.Fatalf("expected two messages, got %d", len(bodies))
+	}
+	if _, present := fieldsOf(t, decodeEmbed(t, bodies[0]))["took"]; present {
+		t.Error("the staging message said how long it took before anything finished")
+	}
+	if took := fieldsOf(t, decodeEmbed(t, bodies[1]))["took"]; took != "1m42s" {
+		t.Errorf("took = %q, want 1m42s", took)
+	}
+
+	// under a second is not worth a field that reads 0s
+	quick := fieldsOf(t, decodeEmbed(t, mustTimedPayload(t, stageLive, 400*time.Millisecond)))
+	if took, present := quick["took"]; present {
+		t.Errorf("a release under a second said it took %q", took)
+	}
+}
+
+type roundTripRecorder struct {
+	next   http.RoundTripper
+	bodies *[][]byte
+}
+
+func (recorder roundTripRecorder) RoundTrip(request *http.Request) (*http.Response, error) {
+	body, _ := io.ReadAll(request.Body)
+	*recorder.bodies = append(*recorder.bodies, body)
+	request.Body = io.NopCloser(bytes.NewReader(body))
+
+	return recorder.next.RoundTrip(request)
+}
+
+func mustTimedPayload(t *testing.T, stage DeployStage, took time.Duration) []byte {
+	t.Helper()
+	payload, err := StagePayload(stage, nil, "lmc", nil, StageVersions{Incoming: "def5678"}, took)
+	if err != nil {
+		t.Fatalf("StagePayload: %v", err)
+	}
+
+	return payload
+}
+
+func stamp(at time.Time) string {
+	return fmt.Sprintf("<t:%d:T>  ", at.Unix())
 }
 
 func TestAffectedNamesPrefersDomainsOverServiceNames(t *testing.T) {
@@ -539,7 +608,7 @@ func TestAffectedNamesPrefersDomainsOverServiceNames(t *testing.T) {
 func mustStagePayload(t *testing.T, stage DeployStage, versions StageVersions) []byte {
 	t.Helper()
 
-	payload, err := StagePayload(stage, nil, "lmc", nil, versions)
+	payload, err := StagePayload(stage, nil, "lmc", nil, versions, 0)
 	if err != nil {
 		t.Fatalf("StagePayload: %v", err)
 	}
@@ -602,10 +671,17 @@ func TestARealDeploySendsTheArcInOrderAndSaysNothingBeforeThereIsAnythingToSay(t
 	}
 
 	arc := titlesOf(t, received, []string{"staging new deployment", "switching over", "update live"})
-	wantLine := ShortCommit(first) + " -> " + ShortCommit(second)
+	wantLine := "```diff\n+ " + ShortCommit(second) + "\n- " + ShortCommit(first) + "\n```"
 	for _, next := range arc {
 		if version := fieldsOf(t, next.embed)["version"]; version != wantLine {
 			t.Errorf("version = %q, want %q", version, wantLine)
+		}
+	}
+	// only the stage that closes the message says how long the release took
+	for index, next := range arc {
+		_, present := fieldsOf(t, next.embed)["took"]
+		if closing := index == len(arc)-1; present != closing {
+			t.Errorf("%v has a took field: %v", next.embed["title"], present)
 		}
 	}
 
@@ -708,35 +784,35 @@ func methodsOf(arrived []notification) []string {
 }
 
 func TestTheRollbackAndDowntimeMessages(t *testing.T) {
-	// a rollback lands on the earlier release, so the arrow turns the same way
-	// the cancelled one does
+	// a rollback lands on the earlier release, so that one gets the + the same
+	// way the cancelled one does
 	rollingBack := decodeEmbed(t, mustStage(t, stageRollingBack, "lmc",
 		StageVersions{Previous: "abc1234", Incoming: "def5678"}))
 
 	if title, _ := rollingBack["title"].(string); title != "rolling back" {
 		t.Errorf("title = %q", title)
 	}
-	if body, _ := rollingBack["description"].(string); body != "14:05:09  we are going back to an earlier version, usually without any interruption" {
+	if body, _ := rollingBack["description"].(string); body != stamp(stageTestTime)+"we are going back to an earlier version, usually without any interruption" {
 		t.Errorf("body = %q", body)
 	}
 	if colour, _ := rollingBack["color"].(float64); int(colour) != 0xf39c12 {
 		t.Errorf("colour = %#x, want amber", int(colour))
 	}
-	if version := fieldsOf(t, rollingBack)["version"]; version != "abc1234 <- def5678" {
-		t.Errorf("version = %q, want the arrow pointing at the release being returned to", version)
+	if version := fieldsOf(t, rollingBack)["version"]; version != "```diff\n+ abc1234\n- def5678\n```" {
+		t.Errorf("version = %q, want the release being returned to on the + line", version)
 	}
 
 	// a rollback that never moved anything says so, and names the release still
-	// serving rather than an arrow for a move that did not happen
+	// serving rather than a - line for a move that did not happen
 	failed := decodeEmbed(t, mustStage(t, stageRollbackFailed, "lmc", StageVersions{Incoming: "def5678"}))
 	if title, _ := failed["title"].(string); title != "rollback failed" {
 		t.Errorf("title = %q", title)
 	}
-	if body, _ := failed["description"].(string); body != "14:05:09  the earlier version could not be started, so nothing changed" {
+	if body, _ := failed["description"].(string); body != stamp(stageTestTime)+"the earlier version could not be started, so nothing changed" {
 		t.Errorf("body = %q", body)
 	}
-	if version := fieldsOf(t, failed)["version"]; version != "def5678" {
-		t.Errorf("version = %q, want the release still serving with no arrow", version)
+	if version := fieldsOf(t, failed)["version"]; version != "```diff\n+ def5678\n```" {
+		t.Errorf("version = %q, want only the release still serving", version)
 	}
 
 	// downtime says the one thing worth saying and nothing about volumes, since
@@ -761,12 +837,14 @@ func TestTheRollbackAndDowntimeMessages(t *testing.T) {
 	}
 }
 
+var stageTestTime = time.Date(2026, 8, 17, 14, 5, 9, 0, time.UTC)
+
 func mustStage(t *testing.T, stage DeployStage, projectName string, versions StageVersions) []byte {
 	t.Helper()
 
-	log := appendLine(nil, stage, time.Date(2026, 8, 17, 14, 5, 9, 0, time.UTC))
+	log := appendLine(nil, stage, stageTestTime)
 
-	payload, err := StagePayload(stage, log, projectName, []string{"lecternmc.com"}, versions)
+	payload, err := StagePayload(stage, log, projectName, []string{"lecternmc.com"}, versions, 0)
 	if err != nil {
 		t.Fatalf("StagePayload: %v", err)
 	}
@@ -889,7 +967,7 @@ func TestARealRollbackAndDestroyBothSpeakToUsers(t *testing.T) {
 	}
 
 	rolled := titlesOf(t, received, []string{"rolling back"})
-	wantLine := ShortCommit(first) + " <- " + ShortCommit(second)
+	wantLine := "```diff\n+ " + ShortCommit(first) + "\n- " + ShortCommit(second) + "\n```"
 	if version := fieldsOf(t, rolled[0].embed)["version"]; version != wantLine {
 		t.Errorf("version = %q, want %q", version, wantLine)
 	}
