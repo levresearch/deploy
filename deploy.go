@@ -2,6 +2,9 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -628,7 +631,11 @@ func startShared(runner Runner, layout Layout, resolved ResolvedProject, commit 
 		return nil, nil
 	}
 
-	rendered, err := RenderShared(resolved, layout, commit)
+	images, err := tagSharedImages(runner, resolved.RuntimeID(), stateful, commit)
+	if err != nil {
+		return nil, err
+	}
+	rendered, err := renderShared(resolved, layout, commit, images)
 	if err != nil {
 		return nil, err
 	}
@@ -637,10 +644,12 @@ func startShared(runner Runner, layout Layout, resolved ResolvedProject, commit 
 	previous, _ := runner.ReadFile(sharedFile)
 
 	if len(previous) > 0 && !bytes.Equal(previous, rendered) {
-		recreated = ServiceNames(stateful)
+		recreated = changedServices(previous, rendered, ServiceNames(stateful))
+	}
+	if len(recreated) > 0 {
 		fmt.Printf(
 			"  shared stack changed, so %s will be recreated. stateful services take a real outage here\n",
-			strings.Join(ServiceNames(stateful), ", "),
+			strings.Join(recreated, ", "),
 		)
 	}
 
@@ -656,8 +665,92 @@ func startShared(runner Runner, layout Layout, resolved ResolvedProject, commit 
 	}
 	running := append(ServiceNames(stateful), tunnelNames(hosted)...)
 	fmt.Printf("  shared stack up (%s)\n", strings.Join(running, ", "))
+	pruneContentImages(runner, resolved.RuntimeID(), images)
 
 	return recreated, nil
+}
+
+// tagSharedImages names each built stateful image by its config and layers. a
+// commit tag changes on every deploy, and under the containerd image store so
+// does the image id, since buildkit attaches a fresh provenance attestation to
+// every build, so naming the shared stack by either recreated the database on
+// deploys that changed nothing in it. a content tag that already exists is
+// left where it is: compose recreates a container whose image id differs from
+// its tag's, and the image it holds is the same one.
+func tagSharedImages(runner Runner, id string, stateful map[string]Service, commit string) (map[string]string, error) {
+	images := map[string]string{}
+	for _, name := range ServiceNames(stateful) {
+		if len(stateful[name].Build) == 0 {
+			continue
+		}
+		built := ImageTag(id, name, commit)
+		output, err := runner.Run([]string{"docker", "image", "inspect", "--format", "{{json .Config}} {{json .RootFS}} {{.Os}}/{{.Architecture}}", built})
+		content := bytes.TrimSpace(output)
+		if err != nil || len(content) == 0 {
+			return nil, fmt.Errorf("reading %s on %s: %s", built, runner.Describe(), firstLine(output))
+		}
+		sum := sha256.Sum256(content)
+		tag := ContentImageTag(id, name, hex.EncodeToString(sum[:])[:12])
+		existing, err := runner.Run([]string{"docker", "image", "ls", "--quiet", tag})
+		if err != nil {
+			return nil, fmt.Errorf("looking for %s on %s: %s", tag, runner.Describe(), firstLine(existing))
+		}
+		if len(bytes.TrimSpace(existing)) == 0 {
+			if output, err := runner.Run([]string{"docker", "tag", built, tag}); err != nil {
+				return nil, fmt.Errorf("tagging %s as %s: %s", built, tag, firstLine(output))
+			}
+		}
+		images[name] = tag
+	}
+
+	return images, nil
+}
+
+// changedServices is the stateful services whose rendering differs, which are
+// the ones compose recreates. a change elsewhere in the file, like a tunnel,
+// restarts none of them. a file that does not parse counts as all of them.
+func changedServices(previous, rendered []byte, names []string) []string {
+	var before, after ComposeProject
+	if json.Unmarshal(previous, &before) != nil || json.Unmarshal(rendered, &after) != nil {
+		return names
+	}
+	var changed []string
+	for _, name := range names {
+		if !sameJSON(before.Services[name], after.Services[name]) {
+			changed = append(changed, name)
+		}
+	}
+
+	return changed
+}
+
+func sameJSON(left, right json.RawMessage) bool {
+	var compactLeft, compactRight bytes.Buffer
+	if json.Compact(&compactLeft, left) != nil || json.Compact(&compactRight, right) != nil {
+		return false
+	}
+
+	return bytes.Equal(compactLeft.Bytes(), compactRight.Bytes())
+}
+
+// pruneContentImages drops the content tags the shared stack no longer runs.
+// the images stay as long as a commit tag holds them, and retention removes
+// those. best effort, like pruneImages.
+func pruneContentImages(runner Runner, id string, images map[string]string) {
+	for _, name := range slices.Sorted(maps.Keys(images)) {
+		listed, err := runner.Run([]string{"docker", "images", "--filter", "reference=" + ContentImageTag(id, name, "*"), "--format", "{{.Repository}}:{{.Tag}}"})
+		if err != nil {
+			continue
+		}
+		for _, tag := range strings.Fields(string(listed)) {
+			if tag == images[name] {
+				continue
+			}
+			if _, err := runner.Run([]string{"docker", "image", "rm", tag}); err != nil {
+				fmt.Fprintf(os.Stderr, "warning: could not remove image %s: %v\n", tag, err)
+			}
+		}
+	}
 }
 
 // runReleaseTasks runs the one-shot work, a migration being the obvious one,

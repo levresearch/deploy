@@ -59,6 +59,12 @@ func ImageTag(id, serviceName, commit string) string {
 	return fmt.Sprintf("deploy-%s/%s:%s", id, serviceName, ShortCommit(commit))
 }
 
+// ContentImageTag names a built image by what is in it, which is what the shared
+// stack runs, so a rebuild that changed nothing leaves the stack as it was.
+func ContentImageTag(id, serviceName, content string) string {
+	return fmt.Sprintf("deploy-%s/%s:content-%s", id, serviceName, content)
+}
+
 // SplitServices divides the config the way the whole design turns on. Stateful
 // services are singletons shared across every commit, and stateless ones are
 // versioned per commit and can run two at a time, which is what makes a cutover
@@ -80,9 +86,15 @@ func SplitServices(services map[string]Service) (stateful, stateless map[string]
 // RenderShared is the stack that outlives every release. It owns the volumes, so
 // nothing here is ever renamed and nothing here is pruned.
 func RenderShared(resolved ResolvedProject, layout Layout, commit string) ([]byte, error) {
+	return renderShared(resolved, layout, commit, nil)
+}
+
+// renderShared runs each built stateful service from the image images names for
+// it, when it names one, instead of the one tagged with the commit.
+func renderShared(resolved ResolvedProject, layout Layout, commit string, images map[string]string) ([]byte, error) {
 	stateful, _ := SplitServices(resolved.Services)
 
-	rendered, err := renderProject(resolved, layout, SharedProjectName(resolved.RuntimeID()), stateful, commit)
+	rendered, err := renderProject(resolved, layout, SharedProjectName(resolved.RuntimeID()), stateful, commit, images)
 	if err != nil {
 		return nil, err
 	}
@@ -116,14 +128,14 @@ func RenderShared(resolved ResolvedProject, layout Layout, commit string) ([]byt
 func RenderRelease(resolved ResolvedProject, layout Layout, commit string) ([]byte, error) {
 	_, stateless := SplitServices(resolved.Services)
 
-	return renderProject(resolved, layout, ProjectName(resolved.RuntimeID(), commit), stateless, commit)
+	return renderProject(resolved, layout, ProjectName(resolved.RuntimeID(), commit), stateless, commit, nil)
 }
 
 // RenderReleaseTasks is a stack nothing ever brings up. Each task is started one
 // at a time with compose run, which is what gives them env files, volumes, and
 // the shared network without any of it being restated here.
 func RenderReleaseTasks(resolved ResolvedProject, layout Layout, commit string) ([]byte, error) {
-	return renderProject(resolved, layout, ReleaseTasksProjectName(resolved.RuntimeID(), commit), resolved.Release, commit)
+	return renderProject(resolved, layout, ReleaseTasksProjectName(resolved.RuntimeID(), commit), resolved.Release, commit, nil)
 }
 
 func ReleaseTasksProjectName(id, commit string) string {
@@ -136,6 +148,7 @@ func renderProject(
 	projectName string,
 	services map[string]Service,
 	commit string,
+	images map[string]string,
 ) ([]byte, error) {
 	rendered := map[string]json.RawMessage{}
 	declaredVolumes := map[string]any{}
@@ -145,7 +158,7 @@ func renderProject(
 		if err != nil {
 			return nil, err
 		}
-		service, err := renderService(resolved, layout, name, placed, commit, services, declaredVolumes)
+		service, err := renderService(resolved, layout, name, placed, commit, images[name], services, declaredVolumes)
 		if err != nil {
 			return nil, err
 		}
@@ -185,6 +198,7 @@ func renderService(
 	name string,
 	service Service,
 	commit string,
+	builtImage string,
 	siblings map[string]Service,
 	declaredVolumes map[string]any,
 ) (json.RawMessage, error) {
@@ -196,7 +210,10 @@ func renderService(
 
 	image := service.Image
 	if len(service.Build) > 0 {
-		image = ImageTag(resolved.RuntimeID(), name, commit)
+		image = builtImage
+		if image == "" {
+			image = ImageTag(resolved.RuntimeID(), name, commit)
+		}
 	}
 	if err := setField(fields, "image", image); err != nil {
 		return nil, err
