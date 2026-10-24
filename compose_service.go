@@ -70,7 +70,7 @@ func RenderServiceRelease(resolved ResolvedProject, layout Layout, name, commit 
 		return nil, fmt.Errorf("%s is not a stateless service", name)
 	}
 
-	return renderProject(resolved, layout, ServiceReleaseProject(resolved.RuntimeID(), name, commit), map[string]Service{name: service}, commit)
+	return renderProject(resolved, layout, ServiceReleaseProject(resolved.RuntimeID(), name, commit), map[string]Service{name: service}, commit, nil)
 }
 
 // workloadRestart keeps Docker from starting a network workload at boot or on

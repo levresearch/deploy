@@ -43,7 +43,7 @@ func RenderExternalRelease(resolved ResolvedProject, layout Layout, name, commit
 		service.Extra["command"] = command
 	}
 
-	return renderProject(resolved, layout, ServiceReleaseProject(resolved.RuntimeID(), name, commit), map[string]Service{name: service}, commit)
+	return renderProject(resolved, layout, ServiceReleaseProject(resolved.RuntimeID(), name, commit), map[string]Service{name: service}, commit, nil)
 }
 
 // runExternal runs one external service's release and records it. the run is
