@@ -375,3 +375,30 @@ func TestBothRunnersListDotfiles(t *testing.T) {
 		t.Errorf("the ssh listing must include dotfiles, got %q", joined)
 	}
 }
+
+func TestAComposeThatRecreatesUnchangedContainersIsNamed(t *testing.T) {
+	cases := map[string]bool{
+		"5.0.0":            true,
+		"v2.29.1":          true,
+		"2.29.1-desktop.1": true,
+		"5.4.9":            true,
+		"5.5.0":            false,
+		"5.6.1":            false,
+		"v6.0.0":           false,
+		"":                 false,
+		"dev":              false,
+		"5.5":              false,
+	}
+	for version, older := range cases {
+		if got := composeOlderThan(version, composeContentDigest); got != older {
+			t.Errorf("compose %q older than 5.5.0 = %v, want %v", version, got, older)
+		}
+	}
+
+	runner := newScriptedRunner()
+	runner.responses["compose version --short"] = "5.0.0\n"
+	facts, err := readDestinationFacts(runner)
+	if err != nil || facts.ComposeVersion != "5.0.0" {
+		t.Fatalf("read compose %q: %v", facts.ComposeVersion, err)
+	}
+}

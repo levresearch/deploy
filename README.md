@@ -9,6 +9,8 @@ on the machine you're running this on, you'll need `git`, `docker`, and `ssh` in
 **your server**
 you just want `docker` installed, if you're exposing the project through a tunnel using our host config, you'll want `cloudflared` installed too
 
+use docker compose 5.5.0 or newer there. older compose recreates a running container whenever a rebuild gives its image a new id, which buildkit's provenance attestation does on every build under the containerd image store, so redeploying a commit restarts services that did not change. deploy warns when it finds an older one.
+
 if either machine is missing something deploy needs, it'll tell you when you run it.
 
 ### to use:
