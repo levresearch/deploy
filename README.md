@@ -318,38 +318,48 @@ this channel is for the people using your thing, not for you, so it says nothing
 
 it starts blue:
 
-```
+````
 staging new deployment
-14:05:09  there is a new version being staged
+2:05:09 PM  there is a new version being staged
 
-version              affected
-abc1234 -> def5678   ```
-                     lecternmc.com
-                     bot
-                     ```
-```
+version         affected
+```diff         ```
++ def5678       lecternmc.com
+- abc1234       bot
+```             ```
+````
 
 turns orange and gains a line when the switch starts, then green when it's done:
 
-```
+````
 update live
-14:05:09  there is a new version being staged
-14:05:20  switching over to the new version now, usually without any interruption
-14:05:31  the new version is up and answering
-```
+2:05:09 PM  there is a new version being staged
+2:05:20 PM  switching over to the new version now, usually without any interruption
+2:05:31 PM  the new version is up and answering
+
+version         affected        took
+```diff         ```             22s
++ def5678       lecternmc.com
+- abc1234       bot
+```             ```
+````
 
 and red if it doesn't work out, so nobody's left sitting on a switching over line that never resolved:
 
 ```
 reverting changes
-14:05:09  there is a new version being staged
-14:05:20  switching over to the new version now, usually without any interruption
-14:05:24  we are reverting changes while we fix some issues with the deployment
+2:05:09 PM  there is a new version being staged
+2:05:20 PM  switching over to the new version now, usually without any interruption
+2:05:24 PM  we are reverting changes while we fix some issues with the deployment
 ```
 
 nothing is ever taken away, so somebody who looks at the channel an hour later reads the whole release out of the one message. the title and the colour are always the state it's in now.
 
-the `version` field reads `abc1234 -> def5678` going forward and `abc1234 <- def5678` when it reverts, so the arrow always points at whichever release you end up on. a first deploy has nothing to move away from so it just says `def5678`.
+each line's time is discord timestamp markup (`<t:…:T>`), so everybody reads it in their own timezone and clock style; the examples show one reader's.
+
+the `version` field is a `diff` block: `+` is the release you end up on and `-` each release it replaces, one per line when destinations were on different ones. a revert ends up on the earlier release, so that one gets the `+`. a first deploy has nothing to move away from so it only has the `+` line.
+
+`took` appears on the message's last stage, live, reverted or a failed rollback, and counts from when the message was first posted.
 
 the `affected` field names hostnames rather than services, one per line, because somebody reading the channel knows the site by its domain and has never heard of the container behind it.
 
