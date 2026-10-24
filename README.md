@@ -355,7 +355,7 @@ reverting changes
 
 nothing is ever taken away, so somebody who looks at the channel an hour later reads the whole release out of the one message. the title and the colour are always the state it's in now.
 
-each line's time is discord timestamp markup (`<t:…:T>`), so everybody reads it in their own timezone and clock style; the examples show one reader's.
+each line's time is discord timestamp markup (`<t:unix:T>`), so everybody reads it in their own timezone and clock style; the examples show one reader's.
 
 the `version` field is a `diff` block: `+` is the release you end up on and `-` each release it replaces, one per line when destinations were on different ones. a revert ends up on the earlier release, so that one gets the `+`. a first deploy has nothing to move away from so it only has the `+` line.
 
