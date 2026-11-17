@@ -27,7 +27,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 24
+          node-version: "26.13.1"
 
       # hosted runners have /dev/kvm but only root can open it until this rule
       # hands it to everyone
