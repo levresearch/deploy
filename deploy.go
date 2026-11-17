@@ -645,6 +645,11 @@ func startShared(runner Runner, layout Layout, resolved ResolvedProject, commit 
 
 	if len(previous) > 0 && !bytes.Equal(previous, rendered) {
 		recreated = changedServices(previous, rendered, ServiceNames(stateful))
+		// compose recreates a changed tunnel as well, and either way the old
+		// container's log would go with it; it is kept under this deploy's commit
+		for _, name := range changedServices(previous, rendered, append(ServiceNames(stateful), tunnelNames(hosted)...)) {
+			keepLogs(runner, layout, commit, SharedProjectName(resolved.RuntimeID()), name)
+		}
 	}
 	if len(recreated) > 0 {
 		fmt.Printf(

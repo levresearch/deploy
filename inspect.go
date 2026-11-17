@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path"
 	"slices"
@@ -293,6 +294,25 @@ func RunLogs(options DeployOptions, serviceName string, follow bool) (int, error
 	// stop with ctrl-c and that needs the terminal
 	if err := runner.Interactive(command); err != nil {
 		return exitDeployFailed, fmt.Errorf("reading logs for %s: %w", serviceName, err)
+	}
+
+	return exitOK, nil
+}
+
+// RunKeptLogs prints the logs a version 2 deploy kept from a release it moved
+// off, which is the only place they survive once the container is gone.
+func RunKeptLogs(options DeployOptions, serviceName, release string, output io.Writer) (int, error) {
+	if _, isService := isServiceConfig(options); !isService {
+		return exitPreconditionNotMet, fmt.Errorf("--release reads logs kept by version 2 deploys; a version 1 release keeps its stopped containers, so deploy logs still reads them")
+	}
+	_, layout, runner, closeRunner, err := openFor(options, serviceName)
+	if err != nil {
+		return exitPreconditionNotMet, err
+	}
+	defer closeRunner()
+
+	if err := printKeptLogs(runner, layout, release, serviceName, output); err != nil {
+		return exitPreconditionNotMet, err
 	}
 
 	return exitOK, nil

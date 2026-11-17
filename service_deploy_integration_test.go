@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -578,5 +579,53 @@ func TestASealedProjectDeploysAndPushesOnlyFromItsSealedCopies(t *testing.T) {
 
 	if code, err := RunDeploy(options); code != exitOK || err != nil {
 		t.Fatalf("sealed deploy: %d %v", code, err)
+	}
+}
+
+func TestADeployKeepsTheLogOfTheReleaseItMovesOffUntilThatReleaseIsPruned(t *testing.T) {
+	dockerAvailable(t)
+	t.Parallel()
+	const id = "fb0000e8"
+	removeDeployment(t, id)
+	repository := newRepository(t)
+	destination := t.TempDir()
+	writeFile(t, repository, "api/Dockerfile", "FROM busybox:latest\nCOPY api/version /version\n")
+	writeFile(t, repository, "api/version", "running version one")
+	first := commitFile(t, repository, configFileName, `{"version": 2, "id": "`+id+`", "name": "keeping", "retention": 1,
+	  "destinations": {"main": "`+destination+`"},
+	  "services": {"api": {"destination": "main", "build": "api/Dockerfile",
+	    "command": ["sh", "-c", "cat /version && sleep 600"],
+	    "healthcheck": {"command": ["CMD", "true"], "interval": "1s", "retries": 5}}}}`)
+	options := DeployOptions{Context: repository}
+	if code, err := RunDeploy(options); code != exitOK || err != nil {
+		t.Fatalf("first deploy: %d %v", code, err)
+	}
+	layout := NewLayout(destination, id)
+
+	second := commitFile(t, repository, "api/version", "running version two")
+	if code, err := RunDeploy(options); code != exitOK || err != nil {
+		t.Fatalf("second deploy: %d %v", code, err)
+	}
+	var output strings.Builder
+	if code, err := RunKeptLogs(options, "api", first, &output); code != exitOK || err != nil {
+		t.Fatalf("reading the kept log: %d %v", code, err)
+	}
+	if !strings.Contains(output.String(), "running version one") {
+		t.Fatalf("the first release's log was not kept when the second replaced it: %q", output.String())
+	}
+	if _, err := RunKeptLogs(options, "api", second, io.Discard); err == nil || !strings.Contains(err.Error(), ShortCommit(first)) {
+		t.Fatalf("the live release has no kept log yet, and the error should name the one that does: %v", err)
+	}
+
+	commitFile(t, repository, "api/version", "running version three")
+	if code, err := RunDeploy(options); code != exitOK || err != nil {
+		t.Fatalf("third deploy: %d %v", code, err)
+	}
+	if _, err := os.Stat(layout.ServiceLogs(first, "api")); !os.IsNotExist(err) {
+		t.Fatalf("the first release was pruned but its log stayed: %v", err)
+	}
+	output.Reset()
+	if code, err := RunKeptLogs(options, "api", second, &output); code != exitOK || err != nil || !strings.Contains(output.String(), "running version two") {
+		t.Fatalf("the previous release's log should stay with it: %d %v %q", code, err, output.String())
 	}
 }

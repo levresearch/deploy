@@ -225,6 +225,16 @@ func PruneReleases(runner Runner, layout Layout, projectID string, state State, 
 		fmt.Printf("  pruned release %s\n", commit)
 	}
 
+	// a version 1 project keeps its stopped containers until here, so the only
+	// logs it keeps are a changed shared stack's
+	referenced := map[string]bool{}
+	for _, commit := range state.Releases {
+		referenced[ShortCommit(commit)] = true
+	}
+	if err := pruneKeptLogs(runner, layout, referenced); err != nil {
+		return state, err
+	}
+
 	return state, nil
 }
 
