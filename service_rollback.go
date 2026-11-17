@@ -268,6 +268,7 @@ func (executor *serviceExecutor) rollService(step rollbackStep) error {
 		return executor.rollInPlace(step, compose, up)
 	}
 	if err := executor.runner.Stream(up, os.Stdout); err != nil {
+		keepLogs(executor.runner, executor.layout, step.target.Commit, step.target.Project, step.name)
 		executor.runner.Run(append(slices.Clone(compose), "rm", "--stop", "--force", step.name))
 		return fmt.Errorf("%s %s never became healthy, so it was removed and nothing was switched", step.target.Project, step.name)
 	}
@@ -286,12 +287,14 @@ func (executor *serviceExecutor) rollInPlace(step rollbackStep, compose, up []st
 		return fmt.Errorf("stopping %s %s: %s", step.live.Project, step.name, firstLine(output))
 	}
 	if err := executor.runner.Stream(up, os.Stdout); err != nil {
+		keepLogs(executor.runner, executor.layout, step.target.Commit, step.target.Project, step.name)
 		executor.runner.Run(append(slices.Clone(compose), "rm", "--stop", "--force", step.name))
 		if output, startErr := executor.runner.Run(append(slices.Clone(live), "start", step.name)); startErr != nil {
 			return fmt.Errorf("%s %s never became healthy, and %s could not be started again either, so nothing is serving it: %s", step.target.Project, step.name, step.live.Project, firstLine(output))
 		}
 		return fmt.Errorf("%s %s never became healthy, so it was removed and %s is serving again", step.target.Project, step.name, step.live.Project)
 	}
+	keepLogs(executor.runner, executor.layout, step.live.Commit, step.live.Project, step.name)
 	if output, err := executor.runner.Run(append(slices.Clone(live), "rm", "--force", step.name)); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: could not remove the stopped %s from %s: %s\n", step.name, step.live.Project, firstLine(output))
 	}

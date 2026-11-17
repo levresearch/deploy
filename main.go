@@ -125,12 +125,14 @@ func runInspect(args []string, command string) int {
 	flags := newFlagSet(command)
 	options := DeployOptions{}
 	follow := false
+	release := ""
 	stringFlag(flags, &options.Context, "context", "C", "", "scope deploy to this path instead of the cwd")
 	stringFlag(flags, &options.Destination, "destination", "D", "", "where the project gets deployed")
 	stringFlag(flags, &options.Environment, "environment", "e", defaultEnvironmentName, "environment to resolve")
 	if command == "logs" {
 		flags.BoolVar(&follow, "follow", false, "keep printing as more arrives")
 		flags.BoolVar(&follow, "f", false, "keep printing as more arrives")
+		flags.StringVar(&release, "release", "", "the logs kept from a release deploy moved off")
 	}
 	if keepGoing, exitCode := parseCommandFlags(flags, args); !keepGoing {
 		return exitCode
@@ -150,7 +152,15 @@ func runInspect(args []string, command string) int {
 	case "list":
 		exitCode, err = RunList(options)
 	case "logs":
-		exitCode, err = RunLogs(options, serviceName, follow)
+		switch {
+		case release != "" && follow:
+			fatal("a kept log is finished, so --release cannot --follow")
+			return exitPreconditionNotMet
+		case release != "":
+			exitCode, err = RunKeptLogs(options, serviceName, release, os.Stdout)
+		default:
+			exitCode, err = RunLogs(options, serviceName, follow)
+		}
 	case "shell":
 		exitCode, err = RunShell(options, serviceName)
 	case "exec":
@@ -422,6 +432,8 @@ usage:
   deploy status           current release, per service health, what is exposed
   deploy list             every project on the destination, not just this one
   deploy logs [-f] <svc>  tail a service
+  deploy logs <svc> --release <commit>
+                          the logs kept from a release deploy moved off
   deploy shell <svc>      a shell inside the running container
   deploy exec <svc> -- .. run one command inside it
   deploy destroy          tear this project down, keeping data unless --volumes;

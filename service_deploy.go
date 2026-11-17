@@ -566,6 +566,7 @@ func retire(run *destinationRun, names []string) {
 	for _, name := range names {
 		current := run.state.Services[name].Current
 		compose := []string{"docker", "compose", "--file", path.Join(run.layout.Root, current.ComposeFile), "--project-name", current.Project}
+		keepLogs(run.runner, run.layout, current.Commit, current.Project, name)
 		if output, err := run.runner.Run(append(compose, "rm", "--stop", "--force", name)); err != nil {
 			fmt.Fprintf(os.Stderr, "warning: could not remove %s from %s on %s: %s\n", name, current.Project, run.name, firstLine(output))
 			continue
@@ -877,6 +878,7 @@ func (executor *serviceExecutor) recreate(state *ServiceState, name string) erro
 		return err
 	}
 	if compose != nil {
+		keepLogs(executor.runner, executor.layout, live.Commit, live.Project, name)
 		if output, err := executor.runner.Run(append(slices.Clone(compose), "rm", "--force", name)); err != nil {
 			fmt.Fprintf(os.Stderr, "warning: could not remove the stopped %s from %s: %s\n", name, live.Project, firstLine(output))
 		}
@@ -895,6 +897,8 @@ func (executor *serviceExecutor) discardCandidates() {
 		if slices.Contains(executor.cutOver, name) || executor.live[name] == release.Project {
 			continue
 		}
+		// a candidate that failed is the log most worth reading afterwards
+		keepLogs(executor.runner, executor.layout, executor.commit, release.Project, name)
 		tearDown(executor.runner, executor.composeFile(release), release.Project)
 	}
 }
@@ -953,7 +957,9 @@ func (executor *serviceExecutor) switchService(name string, live ServiceRelease)
 		fmt.Printf("  https://%s answered\n", host.Domain)
 	}
 
-	// the stopped container goes, the compose file stays for rollback
+	// the stopped container goes, the compose file stays for rollback, and its
+	// log stays with the release
+	keepLogs(executor.runner, executor.layout, live.Commit, live.Project, name)
 	if output, err := executor.runner.Run(append(slices.Clone(compose), "rm", "--force", name)); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: could not remove the stopped %s from %s: %s\n", name, live.Project, firstLine(output))
 	}
@@ -1011,6 +1017,9 @@ func pruneServiceReleases(runner Runner, layout Layout, id string, state Service
 					return state, fmt.Errorf("pruning %s: %w", file, err)
 				}
 			}
+			if err := pruneServiceLogs(runner, layout, commit, name); err != nil {
+				return state, err
+			}
 		}
 		record.Releases = kept
 		for commit := range record.Paths {
@@ -1064,6 +1073,9 @@ func pruneServiceReleases(runner Runner, layout Layout, id string, state Service
 		}
 		pruneImages(runner, id, commit)
 		fmt.Printf("  pruned release %s\n", commit)
+	}
+	if err := pruneKeptLogs(runner, layout, referenced); err != nil {
+		return state, err
 	}
 
 	return state, nil

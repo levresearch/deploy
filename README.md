@@ -435,6 +435,7 @@ the key must be mode 600 and outside the repository, or deploy refuses it. `DEPL
 | `deploy list` | every project on that server, not just this one |
 | `deploy releases` | what's still on the server, current one marked |
 | `deploy logs web` | tail a service, `-f` to follow it |
+| `deploy logs web --release 9f4be0a` | version 2: the logs kept from a release deploy moved off |
 | `deploy shell web` | a shell inside the running container |
 | `deploy exec web -- npm run seed` | run one thing inside it |
 | `deploy env push .env.production` | put a secrets file on the server, mode 600 |
@@ -456,6 +457,10 @@ the key must be mode 600 and outside the repository, or deploy refuses it. `DEPL
 | `deploy destroy --volumes` | remove the data too |
 
 logs, shell and exec work out which stack the service is in themselves, you never have to know whether something is stateful or what commit is live.
+
+**kept logs.** docker keeps a container's log only as long as the container, and a version 2 deploy removes a release's container once it moves off it, so the history you need after a bad deploy used to go with it. now, right before deploy removes a container, it writes that container's whole log once, gzipped, to `logs/<commit>/<service>/<time>.log.gz` in the project directory on the server. that covers a cutover, a fixed-port replacement, a rollback either way, a candidate that failed, a service moved to another destination, and a shared-stack service whose config changed (kept under the commit that changed it). it's one write per replaced container on the server itself, nothing streams continuously and nothing crosses the network. the logs go when pruning drops their release, so `retention` decides how many you keep, same as releases. a failed candidate's commit is never a kept release, so its log lasts until the next successful deploy prunes. losing a log only warns; it never fails a deploy.
+
+docker still writes each running container's log the way the server's daemon is set up, which is `json-file` with no size limit unless you change it. on a small drive, set `log-driver` to `local` with `max-size` and `max-file` in `/etc/docker/daemon.json` and restart docker. that applies to containers created afterwards: every deploy creates its services' containers new, while the shared stack keeps the old setting until it is recreated. a kept log then holds what those files still hold.
 
 **flags**
 
